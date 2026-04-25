@@ -1,0 +1,5 @@
+{
+  "db_path": "clog.sqlite",
+  "gallery_dl_command": null,
+  "metadata_worker_limit": 5
+}
