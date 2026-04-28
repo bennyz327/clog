@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from .config import LOGGER, log_path, log_exception
 from .constants import AmbiguousTarget, UserError
@@ -41,6 +40,7 @@ try:
     from textual.containers import Container, Horizontal, Vertical, VerticalScroll
     from textual.coordinate import Coordinate
     from textual.screen import ModalScreen
+    from textual.worker import Worker, WorkerState
     from textual.widgets import (
         Button, DataTable, Footer, Header, Input,
         Static, TabbedContent, TabPane, TextArea,
@@ -51,6 +51,7 @@ except Exception as _exc:
     Binding = Any  # type: ignore[assignment]
     events = None  # type: ignore[assignment]
     Coordinate = None  # type: ignore[assignment]
+    Worker = WorkerState = Any  # type: ignore[assignment]
     Container = Horizontal = Vertical = VerticalScroll = ModalScreen = object  # type: ignore[assignment]
     Button = DataTable = Footer = Header = Input = Static = TabbedContent = TabPane = TextArea = object  # type: ignore[assignment]
     _TEXTUAL_IMPORT_ERROR = _exc
@@ -125,6 +126,7 @@ if App is not None:
             self.submit_label = submit_label
 
         def compose(self) -> ComposeResult:
+            LOGGER.info("TUI form compose: %s fields=%s", self.title, len(self.fields))
             with Container(id="dialog"):
                 yield Static(self.title, classes="dialog-title")
                 with VerticalScroll(id="dialog-fields"):
@@ -148,6 +150,7 @@ if App is not None:
                     yield Button(self.submit_label, id="submit", variant="primary")
 
         def on_mount(self) -> None:
+            LOGGER.info("TUI form mount: %s", self.title)
             if not self.fields:
                 return
             self.call_after_refresh(self.focus_first_field)
@@ -156,10 +159,13 @@ if App is not None:
             if not self.fields:
                 return
             first_id = f"#field-{self.fields[0]['name']}"
+            LOGGER.info("TUI form focus first: %s target=%s", self.title, first_id)
             try:
                 self.query_one(first_id).focus()
-            except Exception:
-                pass
+            except Exception as exc:
+                log_exception(f"TUI form focus failed {self.title}", exc)
+            else:
+                LOGGER.info("TUI form focus ready: %s", self.title)
 
         def field_value(self, name: str) -> str:
             widget = self.query_one(f"#field-{name}")
@@ -173,7 +179,7 @@ if App is not None:
                 self.dismiss(None)
                 return
             data = {field["name"]: self.field_value(field["name"]).strip() for field in self.fields}
-            LOGGER.info("TUI form submit: %s", self.title)
+            LOGGER.info("TUI form submit: %s keys=%s", self.title, ",".join(sorted(data)))
             self.dismiss(data)
 
     class DetailScreen(ModalScreen[None]):
@@ -445,7 +451,7 @@ if App is not None:
             super().__init__()
             self.db_path = db_path
             self.conn = connect(db_path)
-            self.pending_tasks: set[asyncio.Task[Any]] = set()
+            self.form_action_running = False
             self.search_query_text = ""
             self.page_size = 15
             self.pages = {"creators": 0, "posts": 0, "work": 0}
@@ -506,9 +512,7 @@ if App is not None:
             self.query_one("#search-input", Input).focus()
 
         def on_unmount(self) -> None:
-            for task in list(self.pending_tasks):
-                task.cancel()
-            self.pending_tasks.clear()
+            LOGGER.info("TUI unmount workers=%s", len(list(self.workers)))
 
         def apply_size_class(self, width: int) -> None:
             try:
@@ -864,7 +868,7 @@ if App is not None:
 
         def notify_internal_error(self, action_name: str, exc: Exception) -> None:
             log_exception(f"TUI {action_name}", exc)
-            self.notify(f"{action_name} failed. See {log_path().name}", severity="error", timeout=10)
+            LOGGER.error("TUI action failed: %s see=%s", action_name, log_path().name)
 
         def on_input_changed(self, event: Input.Changed) -> None:
             if event.input.id != "search-input":
@@ -913,34 +917,46 @@ if App is not None:
         def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
             self.refresh_page_bar()
 
-        def start_background_action(self, action_name: str, action: Any) -> None:
-            async def runner() -> None:
-                try:
-                    result = action()
-                    if inspect.isawaitable(result):
-                        await result
-                except asyncio.CancelledError:
-                    LOGGER.info("TUI action cancelled: %s", action_name)
-                    raise
-                except UserError as exc:
-                    self.notify_user_error(exc)
-                except Exception as exc:
-                    self.notify_internal_error(action_name, exc)
+        def start_action_worker(self, action_name: str, action: Callable[[], Awaitable[None]]) -> None:
+            if self.form_action_running:
+                LOGGER.info("TUI action skipped while busy: %s screen_depth=%s", action_name, len(self.screen_stack))
+                return
+            self.form_action_running = True
+            LOGGER.info("TUI action requested: %s screen_depth=%s", action_name, len(self.screen_stack))
+            try:
+                self.run_worker(
+                    self.run_action_worker(action_name, action),
+                    name=f"clog:{action_name}",
+                    group="form-actions",
+                    exit_on_error=False,
+                )
+            except Exception:
+                self.form_action_running = False
+                raise
 
-            LOGGER.info("TUI action start: %s", action_name)
-            task = asyncio.create_task(runner(), name=f"clog:{action_name}")
-            self.pending_tasks.add(task)
+        async def run_action_worker(self, action_name: str, action: Callable[[], Awaitable[None]]) -> None:
+            LOGGER.info("TUI action start: %s screen_depth=%s", action_name, len(self.screen_stack))
+            try:
+                await action()
+            except asyncio.CancelledError:
+                LOGGER.info("TUI action cancelled: %s", action_name)
+                raise
+            except UserError as exc:
+                self.notify_user_error(exc)
+            except Exception as exc:
+                self.notify_internal_error(action_name, exc)
+            finally:
+                self.form_action_running = False
+                LOGGER.info("TUI action end: %s screen_depth=%s", action_name, len(self.screen_stack))
 
-            def _cleanup(done: asyncio.Task[Any]) -> None:
-                self.pending_tasks.discard(done)
-                if done.cancelled():
-                    return
-                exc = done.exception()
-                if exc is not None and not isinstance(exc, UserError):
-                    log_exception(f"TUI background task {action_name}", exc)
-                LOGGER.info("TUI action end: %s", action_name)
-
-            task.add_done_callback(_cleanup)
+        def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+            worker = event.worker
+            worker_name = getattr(worker, "name", "") or ""
+            if not worker_name.startswith("clog:"):
+                return
+            LOGGER.info("TUI worker state: %s -> %s", worker_name, event.state.name)
+            if event.state == WorkerState.ERROR and getattr(worker, "error", None) is not None:
+                log_exception(f"TUI worker error {worker_name}", worker.error)
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             actions = {
@@ -978,24 +994,24 @@ if App is not None:
             self.refresh_page_bar()
 
         async def open_form(self, title: str, fields: list[dict[str, Any]], submit_label: str = "Save") -> dict[str, str] | None:
-            if len(self.screen_stack) > 1:
-                LOGGER.info("TUI form skipped because another modal is already open: %s", title)
-                self.notify("Close the current dialog first", severity="warning", timeout=5)
+            screen_depth = len(self.screen_stack)
+            if screen_depth > 1:
+                LOGGER.info("TUI form skipped because another modal is already open: %s screen_depth=%s", title, screen_depth)
                 return None
-            loop = asyncio.get_running_loop()
-            future: asyncio.Future[dict[str, str] | None] = loop.create_future()
-
-            def handle_dismiss(result: dict[str, str] | None) -> None:
-                LOGGER.info("TUI form dismissed: %s", title)
-                if not future.done():
-                    future.set_result(result)
-
-            LOGGER.info("TUI form open: %s", title)
-            self.push_screen(RecordFormScreen(title, fields, submit_label=submit_label), callback=handle_dismiss)
-            return await future
+            LOGGER.info("TUI form push start: %s screen_depth=%s", title, screen_depth)
+            try:
+                result = await self.push_screen_wait(RecordFormScreen(title, fields, submit_label=submit_label))
+            except asyncio.CancelledError:
+                LOGGER.info("TUI form wait cancelled: %s", title)
+                raise
+            except Exception as exc:
+                log_exception(f"TUI form wait {title}", exc)
+                raise
+            LOGGER.info("TUI form dismissed: %s submitted=%s", title, result is not None)
+            return result
 
         def action_add_creator(self) -> None:
-            self.start_background_action("add creator", self._action_add_creator)
+            self.start_action_worker("add creator", self._action_add_creator)
 
         async def _action_add_creator(self) -> None:
             data = await self.open_form(
@@ -1029,7 +1045,7 @@ if App is not None:
                 self.notify_user_error(exc)
 
         def action_add_name(self) -> None:
-            self.start_background_action("add name", self._action_add_name)
+            self.start_action_worker("add name", self._action_add_name)
 
         async def _action_add_name(self) -> None:
             data = await self.open_form(
@@ -1069,7 +1085,7 @@ if App is not None:
                 self.notify_user_error(exc)
 
         def action_add_url(self) -> None:
-            self.start_background_action("add url", self._action_add_url)
+            self.start_action_worker("add url", self._action_add_url)
 
         async def _action_add_url(self) -> None:
             data = await self.open_form(
@@ -1109,7 +1125,7 @@ if App is not None:
                 self.notify_user_error(exc)
 
         def action_add_post(self) -> None:
-            self.start_background_action("record post", self._action_add_post)
+            self.start_action_worker("record post", self._action_add_post)
 
         async def _action_add_post(self) -> None:
             data = await self.open_form(
@@ -1152,7 +1168,7 @@ if App is not None:
                 self.status("Ready")
 
         def action_add_reminder(self) -> None:
-            self.start_background_action("set reminder", self._action_add_reminder)
+            self.start_action_worker("set reminder", self._action_add_reminder)
 
         async def _action_add_reminder(self) -> None:
             data = await self.open_form(
@@ -1190,7 +1206,7 @@ if App is not None:
                 self.notify_user_error(exc)
 
         def action_add_work(self) -> None:
-            self.start_background_action("add work", self._action_add_work)
+            self.start_action_worker("add work", self._action_add_work)
 
         async def _action_add_work(self) -> None:
             data = await self.open_form(
@@ -1241,6 +1257,9 @@ def launch_tui(db_path: Path) -> int:
     try:
         LOGGER.info("TUI launch db=%s", db_path)
         app.run()
+    except Exception as exc:
+        log_exception("TUI fatal", exc)
+        raise
     finally:
         app.close_connection()
         LOGGER.info("TUI exit db=%s", db_path)
