@@ -297,10 +297,16 @@ SQLite 使用 WAL 模式，程式正常關閉時會做 checkpoint，避免長期
 
 ## 原始碼執行
 
-需要 Python 3.12+。
+需要 Python 3.12+。建議用 venv 隔離：
 
-若要使用 TUI，需安裝 `textual`。
-若要完整貼文 metadata 與平台 ID 補全，需安裝或打包 `gallery-dl`。
+```bash
+python -m venv .venv
+.venv\Scripts\activate   # Windows
+# source .venv/bin/activate  # Linux/macOS
+pip install -r requirements.txt
+```
+
+`textual` 為 TUI 必要套件；`gallery-dl` 為貼文 metadata 補全功能所需。兩者皆為 optional import，CLI 命令不需要它們也能執行。
 
 範例：
 
@@ -312,11 +318,19 @@ python clog.py
 
 ## 打包
 
-Windows onefile 打包：
+**注意**：`clog.spec` 使用 `collect_all()` 從當前 Python 環境收集套件。若環境未安裝依賴，PyInstaller 會靜默略過，打出的 exe 執行時會報 `No module named 'textual'` 等錯誤。
+
+Windows onefile 打包（乾淨 clone 後，使用 venv 隔離避免汙染 OS 環境）：
 
 ```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
 python -m PyInstaller .\clog.spec --noconfirm
+deactivate
 ```
+
+輸出在 `dist\clog.exe`。打包完成後可直接刪除 `.venv\`。
 
 輸出在：
 
