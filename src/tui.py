@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -511,9 +512,65 @@ if App is not None:
             self.apply_size_class(self.size.width)
             self.refresh_all()
             self.query_one("#search-input", Input).focus()
+            smoke_mode = os.getenv("CLOG_TUI_SMOKE", "").strip()
+            if smoke_mode:
+                LOGGER.info("TUI smoke requested: %s", smoke_mode)
+                self.run_smoke_worker(smoke_mode)
 
         def on_unmount(self) -> None:
             LOGGER.info("TUI unmount workers=%s", len(list(self.workers)))
+
+        async def wait_for_form_modal(self, timeout: float = 3.0) -> RecordFormScreen | None:
+            deadline = asyncio.get_running_loop().time() + timeout
+            while asyncio.get_running_loop().time() < deadline:
+                top_screen = self.screen_stack[-1] if self.screen_stack else None
+                if isinstance(top_screen, RecordFormScreen):
+                    return top_screen
+                await asyncio.sleep(0.05)
+            return None
+
+        async def wait_for_form_idle(self, timeout: float = 3.0) -> None:
+            deadline = asyncio.get_running_loop().time() + timeout
+            while asyncio.get_running_loop().time() < deadline:
+                if not self.form_action_running and len(self.screen_stack) <= 1:
+                    return
+                await asyncio.sleep(0.05)
+            raise RuntimeError(
+                f"TUI form action did not settle before timeout screen_depth={len(self.screen_stack)} busy={self.form_action_running}"
+            )
+
+        async def run_smoke_action_cancel(self, smoke_name: str, action_name: str) -> None:
+            LOGGER.info("TUI smoke action begin: %s", smoke_name)
+            handled = await self.run_action(action_name)
+            if not handled:
+                raise RuntimeError(f"TUI smoke action was not handled: {smoke_name} action={action_name}")
+            screen = await self.wait_for_form_modal()
+            if screen is None:
+                raise RuntimeError(f"TUI smoke modal did not open: {smoke_name}")
+            LOGGER.info("TUI smoke modal open: %s title=%s", smoke_name, screen.title)
+            screen.dismiss(None)
+            await self.wait_for_form_idle()
+            LOGGER.info("TUI smoke action end: %s", smoke_name)
+
+        @work(group="smoke-tests", exit_on_error=False)
+        async def run_smoke_worker(self, smoke_mode: str) -> None:
+            LOGGER.info("TUI smoke start: %s", smoke_mode)
+            try:
+                if smoke_mode == "action-add-name-cancel":
+                    await self.run_smoke_action_cancel("action-add-name-cancel", "add_name")
+                elif smoke_mode == "action-add-creator-cancel":
+                    await self.run_smoke_action_cancel("action-add-creator-cancel", "add_creator")
+                else:
+                    raise UserError(f"Unsupported TUI smoke mode: {smoke_mode}")
+            except asyncio.CancelledError:
+                LOGGER.info("TUI smoke cancelled: %s", smoke_mode)
+                raise
+            except Exception as exc:
+                log_exception(f"TUI smoke failed {smoke_mode}", exc)
+            else:
+                LOGGER.info("TUI smoke success: %s", smoke_mode)
+            finally:
+                self.exit()
 
         def apply_size_class(self, width: int) -> None:
             try:
@@ -1010,9 +1067,9 @@ if App is not None:
             return result
 
         def action_add_creator(self) -> None:
-            self.start_action_worker("add creator", self._action_add_creator)
+            self.start_action_worker("add creator", self.handle_add_creator)
 
-        async def _action_add_creator(self) -> None:
+        async def handle_add_creator(self) -> None:
             data = await self.open_form(
                 "Add Creator",
                 [
@@ -1044,9 +1101,9 @@ if App is not None:
                 self.notify_user_error(exc)
 
         def action_add_name(self) -> None:
-            self.start_action_worker("add name", self._action_add_name)
+            self.start_action_worker("add name", self.handle_add_name)
 
-        async def _action_add_name(self) -> None:
+        async def handle_add_name(self) -> None:
             data = await self.open_form(
                 "Add Name Fact",
                 [
@@ -1084,9 +1141,9 @@ if App is not None:
                 self.notify_user_error(exc)
 
         def action_add_url(self) -> None:
-            self.start_action_worker("add url", self._action_add_url)
+            self.start_action_worker("add url", self.handle_add_url)
 
-        async def _action_add_url(self) -> None:
+        async def handle_add_url(self) -> None:
             data = await self.open_form(
                 "Add URL Fact",
                 [
@@ -1124,9 +1181,9 @@ if App is not None:
                 self.notify_user_error(exc)
 
         def action_add_post(self) -> None:
-            self.start_action_worker("record post", self._action_add_post)
+            self.start_action_worker("record post", self.handle_add_post)
 
-        async def _action_add_post(self) -> None:
+        async def handle_add_post(self) -> None:
             data = await self.open_form(
                 "Record Post",
                 [
@@ -1167,9 +1224,9 @@ if App is not None:
                 self.status("Ready")
 
         def action_add_reminder(self) -> None:
-            self.start_action_worker("set reminder", self._action_add_reminder)
+            self.start_action_worker("set reminder", self.handle_add_reminder)
 
-        async def _action_add_reminder(self) -> None:
+        async def handle_add_reminder(self) -> None:
             data = await self.open_form(
                 "Set Reminder",
                 [
@@ -1205,9 +1262,9 @@ if App is not None:
                 self.notify_user_error(exc)
 
         def action_add_work(self) -> None:
-            self.start_action_worker("add work", self._action_add_work)
+            self.start_action_worker("add work", self.handle_add_work)
 
-        async def _action_add_work(self) -> None:
+        async def handle_add_work(self) -> None:
             data = await self.open_form(
                 "Add Work Log",
                 [
