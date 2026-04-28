@@ -19,7 +19,7 @@ def today() -> dt.date:
     return dt.date.today()
 
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHFJA-Z]|\x1b\][^\x07]*\x07")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHFJA-Z]|\x1b][^\x07]*\x07")
 
 
 def strip_ansi(text: str) -> str:
@@ -27,7 +27,7 @@ def strip_ansi(text: str) -> str:
 
 
 class CaptureIO(io.StringIO):
-    def reconfigure(self, *args: Any, **kwargs: Any) -> None:
+    def reconfigure(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 
 
@@ -118,7 +118,7 @@ def json_loads(value: str | None, default: Any = None) -> Any:
         return default
     try:
         return json.loads(value)
-    except Exception:
+    except (TypeError, json.JSONDecodeError):
         return default
 
 

@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .config import LOGGER, app_dir, load_config
+from .config import app_dir, load_config
 from .db import (
     connect,
     insert_name_fact,

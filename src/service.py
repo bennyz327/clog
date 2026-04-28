@@ -14,6 +14,7 @@ from .db import (
     insert_or_update_post,
     insert_url_fact,
     platform_account_creator,
+    require_lastrowid,
     rebuild_search,
     resolve_target,
     upsert_platform_account,
@@ -117,31 +118,33 @@ def add_url_record(
 
 def post_creator_from_metadata(
     conn: sqlite3.Connection,
-    url: str,
+    _url: str,
     metadata_info: dict[str, Any] | None,
     target: str | None,
 ) -> int:
-    metadata_info = metadata_info or {}
-    platform = metadata_info.get("platform")
-    platform_id = metadata_info.get("platform_id")
+    resolved_metadata_info: dict[str, Any] = metadata_info or {}
+    platform = resolved_metadata_info.get("platform")
+    platform_id = resolved_metadata_info.get("platform_id")
     by_account = platform_account_creator(conn, platform, platform_id)
     by_target = resolve_target(conn, target) if target else None
     if by_account is not None and by_target is not None and by_account != by_target:
+        account_creator_id = by_account
+        target_creator_id = by_target
         raise ConflictError(
-            f"metadata account {platform}:{platform_id} points to {creator_label(conn, by_account)}, not {creator_label(conn, by_target)}"
+            f"metadata account {platform}:{platform_id} points to {creator_label(conn, account_creator_id)}, not {creator_label(conn, target_creator_id)}"
         )
     if by_account is not None:
         return by_account
     if by_target is not None:
         return by_target
-    profile_url = metadata_info.get("profile_url")
+    profile_url = resolved_metadata_info.get("profile_url")
     if profile_url:
         ids = creator_ids_by_url(conn, str(profile_url))
         if len(ids) == 1:
             return ids[0]
         if len(ids) > 1:
             raise AmbiguousTarget(str(profile_url), ids)
-    author_name = metadata_info.get("author_name")
+    author_name = resolved_metadata_info.get("author_name")
     if author_name:
         ids = creator_ids_by_name(conn, str(author_name))
         if len(ids) == 1:
@@ -153,7 +156,7 @@ def post_creator_from_metadata(
 
 def add_post_record(
     conn: sqlite3.Connection,
-    db_path: Path,
+    _db_path: Path,
     url: str,
     *,
     target: str | None = None,
@@ -250,4 +253,4 @@ def add_work_record(
              json_dumps(urls or []), json_dumps(metadata), ts, ts),
         )
         rebuild_search(conn)
-    return {"creator_id": creator_id, "work_id": int(cur.lastrowid)}
+    return {"creator_id": creator_id, "work_id": require_lastrowid(cur)}

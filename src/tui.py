@@ -914,7 +914,7 @@ if App is not None:
         def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
             self.handle_table_pick(event.data_table.id or "", event.row_key, force_modal=False)
 
-        def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        def on_tabbed_content_tab_activated(self, _event: TabbedContent.TabActivated) -> None:
             self.refresh_page_bar()
 
         def start_action_worker(self, action_name: str, action: Callable[[], Awaitable[None]]) -> None:
@@ -955,8 +955,9 @@ if App is not None:
             if not worker_name.startswith("clog:"):
                 return
             LOGGER.info("TUI worker state: %s -> %s", worker_name, event.state.name)
-            if event.state == WorkerState.ERROR and getattr(worker, "error", None) is not None:
-                log_exception(f"TUI worker error {worker_name}", worker.error)
+            worker_error = getattr(worker, "error", None)
+            if event.state == WorkerState.ERROR and worker_error is not None:
+                log_exception(f"TUI worker error {worker_name}", worker_error)
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             actions = {

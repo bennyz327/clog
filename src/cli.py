@@ -33,7 +33,7 @@ from .service import (
     set_reminder_record,
 )
 from .tui import launch_tui
-from .utils import json_loads, make_parser, parse_known, prompt_input, shorten, split_values
+from .utils import json_loads, make_parser, parse_known, prompt_input, shorten
 from .worker import process_metadata_tasks
 from .db import fetch_creator_snapshot
 
@@ -265,6 +265,7 @@ def browse_recent_list(
         else:
             print_work_detail(conn, int(row["id"]))
         prompt_input("press Enter to return to list...")
+    raise AssertionError("browse_recent_list loop should not exit")
 
 
 def interactive_ls(conn: sqlite3.Connection, db_path: Path, page_size: int) -> None:
@@ -371,7 +372,7 @@ def cmd_post(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
     print(f"recorded post #{result['post_id']} for {creator_label(conn, result['creator_id'])}")
 
 
-def cmd_remind(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
+def cmd_remind(conn: sqlite3.Connection, _db_path: Path, args: list[str]) -> None:
     parser = make_parser("clog remind")
     parser.add_argument("target")
     parser.add_argument("when")
@@ -385,7 +386,7 @@ def cmd_remind(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None
     print(f"reminder set for {creator_label(conn, result['creator_id'])}: {result['due_at']}")
 
 
-def cmd_due(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
+def cmd_due(conn: sqlite3.Connection, _db_path: Path, args: list[str]) -> None:
     parser = make_parser("clog due")
     parser.add_argument("--all", action="store_true")
     ns = parse_known(parser, args)
@@ -406,7 +407,7 @@ def cmd_ls(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
         interactive_ls(conn, db_path, page_size)
 
 
-def cmd_work(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
+def cmd_work(conn: sqlite3.Connection, _db_path: Path, args: list[str]) -> None:
     parser = make_parser("clog work")
     parser.add_argument("target")
     parser.add_argument("message")
@@ -474,7 +475,7 @@ def cmd_search(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None
         print("use `clog s QUERY -i` to choose, or `clog v #id` to show a main record")
 
 
-def cmd_show(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
+def cmd_show(conn: sqlite3.Connection, _db_path: Path, args: list[str]) -> None:
     parser = make_parser("clog show")
     parser.add_argument("target")
     ns = parse_known(parser, args)
@@ -536,7 +537,7 @@ COMMANDS: dict[str, tuple[str, CommandHandler]] = {
 }
 
 
-def dispatch(db_path: Path, quiet: bool, argv: list[str]) -> int:
+def dispatch(db_path: Path, _quiet: bool, argv: list[str]) -> int:
     LOGGER.info("Dispatch db=%s argv=%s", db_path, argv)
     if argv and argv[0] == "__meta_worker":
         parser = make_parser("clog __meta_worker")
@@ -577,14 +578,14 @@ def dispatch(db_path: Path, quiet: bool, argv: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
+    effective_argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        db_path, quiet, rest = parse_global_options(argv)
+        db_path, quiet, rest = parse_global_options(effective_argv)
         return dispatch(db_path, quiet, rest)
     except AmbiguousTarget as exc:
         LOGGER.warning("Ambiguous target: %s", exc.target)
         try:
-            db_path, _, _ = parse_global_options(argv)
+            db_path, _, _ = parse_global_options(effective_argv)
             conn = connect(db_path)
             try:
                 print(f"ambiguous target: {exc.target}", file=sys.stderr)

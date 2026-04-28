@@ -34,7 +34,7 @@ def setup_logging() -> logging.Logger:
         handler = RotatingFileHandler(log_path(), maxBytes=1_000_000, backupCount=3, encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         logger.addHandler(handler)
-    except Exception:
+    except (OSError, ValueError):
         logger.addHandler(logging.NullHandler())
     logger.propagate = False
     return logger
@@ -61,20 +61,20 @@ def load_config() -> dict[str, Any]:
         return {}
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, json.JSONDecodeError):
         return {}
 
 
 def write_default_config(path: Path | None = None) -> None:
-    path = path or config_path()
-    if path.exists():
+    resolved_path = config_path() if path is None else path
+    if resolved_path.exists():
         return
     data = {
         "db_path": DB_NAME,
         "gallery_dl_command": None,
         "metadata_worker_limit": 5,
     }
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    resolved_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def default_db_path() -> Path:

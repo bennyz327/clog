@@ -356,13 +356,19 @@ def resolve_target(
 
 # ── write operations ──────────────────────────────────────────────────────────
 
+def require_lastrowid(cur: sqlite3.Cursor) -> int:
+    rowid = cur.lastrowid
+    if rowid is None:
+        raise RuntimeError("insert did not produce lastrowid")
+    return int(rowid)
+
 def insert_creator(conn: sqlite3.Connection, name: str, note: str | None = None) -> int:
     ts = now_iso()
     cur = conn.execute(
         "INSERT INTO creators(primary_name, note, created_at, updated_at) VALUES(?, ?, ?, ?)",
         (name, note, ts, ts),
     )
-    creator_id = int(cur.lastrowid)
+    creator_id = require_lastrowid(cur)
     insert_name_fact(conn, creator_id, name, reason="initial", note=note)
     return creator_id
 
@@ -426,7 +432,7 @@ def insert_name_fact(
          json_dumps(metadata), ts, ts, ts, ts),
     )
     conn.execute("UPDATE creators SET updated_at = ? WHERE id = ?", (ts, creator_id))
-    return int(cur.lastrowid)
+    return require_lastrowid(cur)
 
 
 def upsert_platform_account(
@@ -483,7 +489,7 @@ def upsert_platform_account(
          source, json_dumps(metadata), ts, ts, ts, ts),
     )
     conn.execute("UPDATE creators SET updated_at = ? WHERE id = ?", (ts, creator_id))
-    return int(cur.lastrowid)
+    return require_lastrowid(cur)
 
 
 def insert_metadata_task(
@@ -581,7 +587,7 @@ def insert_url_fact(
             (creator_id, url, canon, platform, platform_id, name, from_url, reason, status, note,
              json_dumps(metadata), ts, ts, ts, ts),
         )
-        url_id = int(cur.lastrowid)
+        url_id = require_lastrowid(cur)
 
     if platform and platform_id:
         upsert_platform_account(
@@ -611,7 +617,7 @@ def insert_or_update_post(
     canon = canonical_url(url)
     if not canon:
         raise UserError(f"Invalid URL: {url}")
-    metadata_info = metadata_info or {}
+    resolved_metadata_info: dict[str, Any] = metadata_info or {}
     ts = now_iso()
     existing = conn.execute(
         "SELECT id, creator_id FROM posts WHERE canonical_url = ?", (canon,)
@@ -621,14 +627,14 @@ def insert_or_update_post(
             f"Post URL is already linked to {creator_label(conn, int(existing['creator_id']))}: {url}"
         )
     values = (
-        metadata_info.get("platform"),
-        metadata_info.get("post_id"),
-        metadata_info.get("platform_id"),
-        metadata_info.get("author_name"),
-        metadata_info.get("title"),
-        metadata_info.get("text"),
-        metadata_info.get("posted_at"),
-        json_dumps(metadata_info.get("raw")),
+        resolved_metadata_info.get("platform"),
+        resolved_metadata_info.get("post_id"),
+        resolved_metadata_info.get("platform_id"),
+        resolved_metadata_info.get("author_name"),
+        resolved_metadata_info.get("title"),
+        resolved_metadata_info.get("text"),
+        resolved_metadata_info.get("posted_at"),
+        json_dumps(resolved_metadata_info.get("raw")),
         note,
         ts,
         ts,
@@ -662,13 +668,13 @@ def insert_or_update_post(
         )
         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (creator_id, url, canon, metadata_info.get("platform"), metadata_info.get("post_id"),
-         metadata_info.get("platform_id"), metadata_info.get("author_name"),
-         metadata_info.get("title"), metadata_info.get("text"), metadata_info.get("posted_at"),
-         ts, json_dumps(metadata_info.get("raw")), note, ts, ts),
+        (creator_id, url, canon, resolved_metadata_info.get("platform"), resolved_metadata_info.get("post_id"),
+         resolved_metadata_info.get("platform_id"), resolved_metadata_info.get("author_name"),
+         resolved_metadata_info.get("title"), resolved_metadata_info.get("text"), resolved_metadata_info.get("posted_at"),
+         ts, json_dumps(resolved_metadata_info.get("raw")), note, ts, ts),
     )
     conn.execute("UPDATE creators SET updated_at = ? WHERE id = ?", (ts, creator_id))
-    return int(cur.lastrowid)
+    return require_lastrowid(cur)
 
 
 # ── search ────────────────────────────────────────────────────────────────────
