@@ -34,7 +34,7 @@ from .utils import json_loads, shorten, split_values
 _TEXTUAL_IMPORT_ERROR: Exception | None = None
 
 try:
-    from textual import events
+    from textual import events, work
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Container, Horizontal, Vertical, VerticalScroll
@@ -51,6 +51,7 @@ except Exception as _exc:
     Binding = Any  # type: ignore[assignment]
     events = None  # type: ignore[assignment]
     Coordinate = None  # type: ignore[assignment]
+    work = Any  # type: ignore[assignment]
     Worker = WorkerState = Any  # type: ignore[assignment]
     Container = Horizontal = Vertical = VerticalScroll = ModalScreen = object  # type: ignore[assignment]
     Button = DataTable = Footer = Header = Input = Static = TabbedContent = TabPane = TextArea = object  # type: ignore[assignment]
@@ -924,16 +925,12 @@ if App is not None:
             self.form_action_running = True
             LOGGER.info("TUI action requested: %s screen_depth=%s", action_name, len(self.screen_stack))
             try:
-                self.run_worker(
-                    self.run_action_worker(action_name, action),
-                    name=f"clog:{action_name}",
-                    group="form-actions",
-                    exit_on_error=False,
-                )
+                self.run_action_worker(action_name, action)
             except Exception:
                 self.form_action_running = False
                 raise
 
+        @work(group="form-actions", exit_on_error=False)
         async def run_action_worker(self, action_name: str, action: Callable[[], Awaitable[None]]) -> None:
             LOGGER.info("TUI action start: %s screen_depth=%s", action_name, len(self.screen_stack))
             try:
@@ -951,9 +948,10 @@ if App is not None:
 
         def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
             worker = event.worker
-            worker_name = getattr(worker, "name", "") or ""
-            if not worker_name.startswith("clog:"):
+            worker_group = getattr(worker, "group", "") or ""
+            if worker_group != "form-actions":
                 return
+            worker_name = getattr(worker, "name", "") or "form-actions"
             LOGGER.info("TUI worker state: %s -> %s", worker_name, event.state.name)
             worker_error = getattr(worker, "error", None)
             if event.state == WorkerState.ERROR and worker_error is not None:
