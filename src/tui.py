@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -17,6 +16,8 @@ from .db import (
     fetch_post_detail_row,
     fetch_work_detail_row,
     grouped_search,
+    profile_brief,
+    profile_rows_by_creator,
     recent_creators,
     recent_posts,
     recent_worklogs,
@@ -30,7 +31,7 @@ from .service import (
     add_work_record,
     set_reminder_record,
 )
-from .utils import json_loads, shorten, split_values
+from .utils import shorten
 
 _TEXTUAL_IMPORT_ERROR: Exception | None = None
 
@@ -307,6 +308,97 @@ if App is not None:
                 "ctx-work": "work",
             }
             self.dismiss(mapping.get(bid))
+
+    class ProfileChoiceScreen(ModalScreen[dict[str, Any] | None]):
+        CSS = """
+        ProfileChoiceScreen {
+            align: center middle;
+            background: rgba(3, 7, 18, 0.72);
+        }
+
+        #profile-choice {
+            width: 84;
+            max-width: 120;
+            height: auto;
+            max-height: 90%;
+            padding: 1 2;
+            background: #101826;
+            border: round #3c7cff;
+        }
+
+        #profile-choice-title {
+            text-style: bold;
+            color: #f8fafc;
+            padding-bottom: 1;
+        }
+
+        #profile-choice-help {
+            color: #93c5fd;
+            padding-bottom: 1;
+        }
+
+        #profile-choice-list {
+            max-height: 20;
+        }
+
+        #profile-choice-list Button {
+            width: 1fr;
+            margin-top: 1;
+        }
+        """
+
+        BINDINGS = [Binding("escape", "dismiss", "Close", show=True)]
+
+        def __init__(self, creator_name: str, profiles: list[sqlite3.Row]) -> None:
+            super().__init__()
+            self.creator_name = creator_name
+            self.profiles = profiles
+
+        def compose(self) -> ComposeResult:
+            with Container(id="profile-choice"):
+                yield Static(f"Add Name For {self.creator_name}", id="profile-choice-title")
+                yield Static(
+                    "Choose generic alias, an existing profile rename, or create a profile via author URL.",
+                    id="profile-choice-help",
+                )
+                with VerticalScroll(id="profile-choice-list"):
+                    yield Button("Generic Alias (creator-level)", id="choice-generic", variant="primary")
+                    for row in self.profiles:
+                        label = profile_brief(
+                            row["platform"],
+                            row["platform_id"],
+                            row["display_name"],
+                            row["primary_url"],
+                        )
+                        yield Button(label, id=f"choice-profile-{row['id']}")
+                    yield Button("Via Author URL", id="choice-url")
+                    yield Button("Cancel", id="choice-cancel")
+
+        def on_mount(self) -> None:
+            try:
+                self.query_one("#choice-generic", Button).focus()
+            except Exception:
+                pass
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            button_id = event.button.id or ""
+            if button_id == "choice-cancel":
+                self.dismiss(None)
+                return
+            if button_id == "choice-generic":
+                self.dismiss({"mode": "generic"})
+                return
+            if button_id == "choice-url":
+                self.dismiss({"mode": "url"})
+                return
+            prefix = "choice-profile-"
+            if button_id.startswith(prefix):
+                try:
+                    profile_id = int(button_id[len(prefix):])
+                except ValueError:
+                    self.dismiss(None)
+                    return
+                self.dismiss({"mode": "profile", "profile_id": profile_id})
 
     class ClogApp(App[None]):
         TITLE = "CreatorLog"
@@ -671,10 +763,10 @@ if App is not None:
             for table_id, columns in {
                 "#due-table": ["Due", "Creator"],
                 "#sidebar-creators": ["Creator", "Updated"],
-                "#search-table": ["ID", "Creator", "Matches", "Accounts", "URLs"],
-                "#creators-table": ["ID", "Creator", "URLs", "Posts", "Work", "Updated"],
-                "#posts-table": ["Post", "Creator", "Title", "Platform", "Captured"],
-                "#work-table": ["Work", "Creator", "Message", "Tags", "Created"],
+                "#search-table": ["ID", "Creator", "Matches", "Profiles", "URLs"],
+                "#creators-table": ["ID", "Creator", "Profiles", "URLs", "Posts", "Updated"],
+                "#posts-table": ["Post", "Creator", "Title", "Profile", "Captured"],
+                "#work-table": ["Work", "Creator", "Content", "Created"],
             }.items():
                 table = self.query_one(table_id, DataTable)
                 table.cursor_type = "row"
@@ -698,6 +790,11 @@ if App is not None:
 
         def current_target(self) -> str:
             return f"#{self.current_creator_id}" if self.current_creator_id else ""
+
+        def require_current_creator(self) -> int:
+            if not self.current_creator_id:
+                raise UserError("Select a creator first.")
+            return int(self.current_creator_id)
 
         def active_recent_kind(self) -> str | None:
             active = self.query_one("#main-tabs", TabbedContent).active
@@ -807,27 +904,27 @@ if App is not None:
             query = self.search_query_text.strip()
             if not query:
                 for row in recent_creators(self.conn, 20):
-                    meta = f"recent | urls {row['url_count']} posts {row['post_count']} work {row['work_count']}"
+                    meta = f"recent | posts {row['post_count']} work {row['work_count']}"
                     table.add_row(
                         f"#{row['id']}",
                         row["primary_name"],
                         meta,
-                        "-",
-                        shorten(row["updated_at"], 19),
+                        str(row["profile_count"]),
+                        str(row["url_count"]),
                         key=str(row["id"]),
                     )
                     self.table_keys["search-table"].append(int(row["id"]))
                 return
             for group in grouped_search(self.conn, query, limit=20):
                 creator = group["creator"]
-                accounts = ", ".join(group["accounts"][:2]) or "-"
-                urls = "; ".join(shorten(url, 32) for _, url in group["urls"][:2]) or "-"
+                profiles = "; ".join(shorten(text, 40) for text in group["profiles"][:2]) or "-"
+                urls = "; ".join(shorten(url, 32) for url in group["urls"][:2]) or "-"
                 matches = format_kind_counts(group["kind_counts"])
                 table.add_row(
                     f"#{creator['id']}",
                     creator["primary_name"],
                     matches or "-",
-                    accounts,
+                    profiles,
                     urls,
                     key=str(creator["id"]),
                 )
@@ -846,9 +943,9 @@ if App is not None:
                     table.add_row(
                         f"#{row['id']}",
                         row["primary_name"],
+                        str(row["profile_count"]),
                         str(row["url_count"]),
                         str(row["post_count"]),
-                        str(row["work_count"]),
                         shorten(row["updated_at"], 19),
                         key=str(row["id"]),
                     )
@@ -861,11 +958,12 @@ if App is not None:
                 page_rows = rows[: self.page_size]
                 self.has_next_page[kind] = len(rows) > self.page_size
                 for row in page_rows:
+                    profile = profile_brief(row["platform"], row["platform_id"], row["display_name"])
                     table.add_row(
                         f"post:{row['id']}",
                         f"#{row['creator_id']} {row['primary_name']}",
                         shorten(row["title"] or row["url"], 50),
-                        row["platform"] or "-",
+                        shorten(profile, 36),
                         shorten(row["captured_at"], 19),
                         key=str(row["id"]),
                     )
@@ -877,12 +975,10 @@ if App is not None:
             page_rows = rows[: self.page_size]
             self.has_next_page[kind] = len(rows) > self.page_size
             for row in page_rows:
-                tags = ",".join(json_loads(row["tags_json"], [])[:3]) or "-"
                 table.add_row(
                     f"work:{row['id']}",
                     f"#{row['creator_id']} {row['primary_name']}",
-                    shorten(row["message"], 44),
-                    tags,
+                    shorten(row["content"], 52),
                     shorten(row["created_at"], 19),
                     key=str(row["id"]),
                 )
@@ -1066,6 +1162,13 @@ if App is not None:
             LOGGER.info("TUI form dismissed: %s submitted=%s", title, result is not None)
             return result
 
+        async def open_profile_choice(self, creator_id: int) -> dict[str, Any] | None:
+            creator = fetch_creator_snapshot(self.conn, creator_id)["creator"]
+            profiles = profile_rows_by_creator(self.conn, creator_id)
+            return await self.push_screen_wait(
+                ProfileChoiceScreen(creator["primary_name"], profiles)
+            )
+
         def action_add_creator(self) -> None:
             self.start_action_worker("add creator", self.handle_add_creator)
 
@@ -1075,8 +1178,6 @@ if App is not None:
                 [
                     {"name": "name", "label": "Name", "placeholder": "creator name"},
                     {"name": "url", "label": "First URL", "placeholder": "https://..."},
-                    {"name": "platform", "label": "Platform", "placeholder": "optional"},
-                    {"name": "pid", "label": "Platform ID", "placeholder": "optional"},
                     {"name": "note", "label": "Note", "kind": "textarea", "placeholder": "optional"},
                 ],
                 submit_label="Create",
@@ -1090,12 +1191,12 @@ if App is not None:
                 result = add_creator_record(
                     self.conn, self.db_path, data["name"],
                     url=data["url"] or None,
-                    platform=data["platform"] or None,
-                    platform_id=data["pid"] or None,
                     note=data["note"] or None,
                 )
                 self.refresh_all()
                 self.show_detail("creator", int(result["creator_id"]))
+                if result.get("warning"):
+                    self.notify(result["warning"], severity="warning", timeout=6)
                 self.notify(f"Added {creator_label(self.conn, int(result['creator_id']))}", severity="information")
             except UserError as exc:
                 self.notify_user_error(exc)
@@ -1104,39 +1205,58 @@ if App is not None:
             self.start_action_worker("add name", self.handle_add_name)
 
         async def handle_add_name(self) -> None:
+            creator_id = self.require_current_creator()
             data = await self.open_form(
-                "Add Name Fact",
+                "Add Name",
                 [
-                    {"name": "target", "label": "Target", "value": self.current_target(), "placeholder": "#id / name / URL / platform:pid"},
                     {"name": "name", "label": "Name", "placeholder": "new name"},
-                    {"name": "platform", "label": "Platform", "placeholder": "optional"},
-                    {"name": "pid", "label": "Platform ID", "placeholder": "optional"},
-                    {"name": "url", "label": "URL", "placeholder": "optional"},
-                    {"name": "from_name", "label": "From Name", "placeholder": "optional"},
-                    {"name": "reason", "label": "Reason", "placeholder": "same-person / rename / new-account"},
-                    {"name": "status", "label": "Status", "value": "active"},
-                    {"name": "note", "label": "Note", "kind": "textarea", "placeholder": "optional"},
                 ],
             )
             if not data:
                 return
-            if not data["target"] or not data["name"]:
-                self.notify("Target and name are required", severity="error")
+            if not data["name"]:
+                self.notify("Name is required", severity="error")
                 return
             try:
-                result = add_name_record(
-                    self.conn, self.db_path, data["target"], data["name"],
-                    platform=data["platform"] or None,
-                    platform_id=data["pid"] or None,
-                    url=data["url"] or None,
-                    from_name=data["from_name"] or None,
-                    reason=data["reason"] or None,
-                    status=data["status"] or "active",
-                    note=data["note"] or None,
-                )
+                choice = await self.open_profile_choice(creator_id)
+                if not choice:
+                    return
+                if choice["mode"] == "generic":
+                    result = add_name_record(
+                        self.conn, self.db_path, f"#{creator_id}", data["name"],
+                    )
+                elif choice["mode"] == "profile":
+                    result = add_name_record(
+                        self.conn,
+                        self.db_path,
+                        f"#{creator_id}",
+                        data["name"],
+                        profile_id=int(choice["profile_id"]),
+                    )
+                else:
+                    url_data = await self.open_form(
+                        "Add Name Via Author URL",
+                        [
+                            {"name": "url", "label": "Author URL", "placeholder": "https://..."},
+                        ],
+                    )
+                    if not url_data:
+                        return
+                    if not url_data["url"]:
+                        self.notify("Author URL is required", severity="error")
+                        return
+                    result = add_name_record(
+                        self.conn,
+                        self.db_path,
+                        f"#{creator_id}",
+                        data["name"],
+                        context=url_data["url"],
+                    )
                 self.refresh_all()
                 self.show_detail("creator", int(result["creator_id"]))
-                self.notify("Name fact added", severity="information")
+                if result.get("warning"):
+                    self.notify(result["warning"], severity="warning", timeout=6)
+                self.notify("Name added", severity="information")
             except UserError as exc:
                 self.notify_user_error(exc)
 
@@ -1144,39 +1264,29 @@ if App is not None:
             self.start_action_worker("add url", self.handle_add_url)
 
         async def handle_add_url(self) -> None:
+            creator_id = self.require_current_creator()
             data = await self.open_form(
-                "Add URL Fact",
+                "Add URL",
                 [
-                    {"name": "target", "label": "Target", "value": self.current_target(), "placeholder": "#id / name / URL / platform:pid"},
                     {"name": "url", "label": "URL", "placeholder": "https://..."},
-                    {"name": "platform", "label": "Platform", "placeholder": "optional"},
-                    {"name": "pid", "label": "Platform ID", "placeholder": "optional"},
-                    {"name": "name", "label": "Display Name", "placeholder": "optional"},
-                    {"name": "from_url", "label": "From URL", "placeholder": "optional"},
-                    {"name": "reason", "label": "Reason", "placeholder": "new-platform / moved / banned / inactive"},
-                    {"name": "status", "label": "Status", "value": "active"},
                     {"name": "note", "label": "Note", "kind": "textarea", "placeholder": "optional"},
                 ],
             )
             if not data:
                 return
-            if not data["target"] or not data["url"]:
-                self.notify("Target and URL are required", severity="error")
+            if not data["url"]:
+                self.notify("URL is required", severity="error")
                 return
             try:
                 result = add_url_record(
-                    self.conn, self.db_path, data["target"], data["url"],
-                    platform=data["platform"] or None,
-                    platform_id=data["pid"] or None,
-                    name=data["name"] or None,
-                    from_url=data["from_url"] or None,
-                    reason=data["reason"] or None,
-                    status=data["status"] or "active",
+                    self.conn, self.db_path, f"#{creator_id}", data["url"],
                     note=data["note"] or None,
                 )
                 self.refresh_all()
                 self.show_detail("creator", int(result["creator_id"]))
-                self.notify("URL fact added", severity="information")
+                if result.get("warning"):
+                    self.notify(result["warning"], severity="warning", timeout=6)
+                self.notify("URL attached", severity="information")
             except UserError as exc:
                 self.notify_user_error(exc)
 
@@ -1185,10 +1295,9 @@ if App is not None:
 
         async def handle_add_post(self) -> None:
             data = await self.open_form(
-                "Record Post",
+                "Record Post (Existing Profile Required)",
                 [
                     {"name": "url", "label": "Post URL", "placeholder": "https://..."},
-                    {"name": "target", "label": "Target", "value": self.current_target(), "placeholder": "optional if metadata can identify creator"},
                     {"name": "note", "label": "Note", "kind": "textarea", "placeholder": "optional"},
                     {"name": "timeout", "label": "Timeout Seconds", "value": "60"},
                 ],
@@ -1206,15 +1315,16 @@ if App is not None:
                 return
             self.status("Recording post metadata...")
             try:
+                target = self.current_target() or None
                 result = add_post_record(
                     self.conn, self.db_path, data["url"],
-                    target=data["target"] or None,
+                    target=target,
                     note=data["note"] or None,
                     timeout=timeout,
                 )
                 self.refresh_all()
                 self.show_detail("post", int(result["post_id"]))
-                if result["warning"]:
+                if result.get("warning"):
                     self.notify(result["warning"], severity="warning", timeout=6)
                 else:
                     self.notify("Post recorded", severity="information")
@@ -1269,33 +1379,18 @@ if App is not None:
                 "Add Work Log",
                 [
                     {"name": "target", "label": "Target", "value": self.current_target(), "placeholder": "#id / name / URL / platform:pid"},
-                    {"name": "message", "label": "Message", "kind": "textarea", "placeholder": "what you did"},
-                    {"name": "tags", "label": "Tags", "placeholder": "comma or newline separated"},
-                    {"name": "paths", "label": "Paths", "kind": "textarea", "placeholder": "comma or newline separated"},
-                    {"name": "urls", "label": "URLs", "kind": "textarea", "placeholder": "comma or newline separated"},
-                    {"name": "meta", "label": "Metadata JSON", "kind": "textarea", "placeholder": "optional JSON"},
+                    {"name": "content", "label": "Content", "kind": "textarea", "placeholder": "markdown-ready work log content"},
                 ],
                 submit_label="Record Work",
             )
             if not data:
                 return
-            if not data["target"] or not data["message"]:
-                self.notify("Target and message are required", severity="error")
+            if not data["target"] or not data["content"]:
+                self.notify("Target and content are required", severity="error")
                 return
-            metadata = None
-            if data["meta"]:
-                try:
-                    metadata = json.loads(data["meta"])
-                except json.JSONDecodeError:
-                    self.notify("Metadata JSON is invalid", severity="error")
-                    return
             try:
                 result = add_work_record(
-                    self.conn, data["target"], data["message"],
-                    tags=split_values(data["tags"]),
-                    paths=split_values(data["paths"]),
-                    urls=split_values(data["urls"]),
-                    metadata=metadata,
+                    self.conn, data["target"], data["content"],
                 )
                 self.refresh_all()
                 self.show_detail("work", int(result["work_id"]))

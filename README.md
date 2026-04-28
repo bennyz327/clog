@@ -1,314 +1,210 @@
 # CreatorLog (`clog`)
 
-一個以「創作者主檔」為核心的本地追蹤工具，適合用來記錄創作者的名稱、網址、平台帳號 ID、貼文 metadata、提醒與整理作業紀錄。
+`clog` 是一個以「創作者主檔」為核心的本地 SQLite 追蹤工具，用來整理：
 
-工具目標是：
+- 創作者主檔
+- 平台帳號 / 作者頁 URL
+- 名稱歷史
+- 貼文 metadata
+- 提醒
+- 工作紀錄
 
-- 跨平台使用，Windows / Linux 都能跑
-- 資料全部落在本地 SQLite
-- 冷啟動快，CLI 操作短
-- 所有資訊都圍繞同一個創作者主檔
-- 支援全局搜尋，不需要先選資料類型
+目前資料模型已切到 profile-centric identity model：外部身份的單一真相來源是 `creator_profiles`。
 
 ## 核心概念
 
-`clog` 不是把「作者名稱」、「網址」、「貼文」、「整理記錄」拆成彼此獨立的主體，而是把它們都當成附加在同一個創作者主檔上的事實。
+`clog` 把 identity 分成三層：
 
-這代表：
+- `creators`
+  - 穩定主檔
+  - `primary_name` 只是主標籤，不代表平台當前顯示名稱
+- `creator_profiles`
+  - 系統已知的平台帳號
+  - 唯一身份鍵是 `(platform, platform_id)`
+- `profile_urls`
+  - 掛在 profile 下的作者頁 URL
 
-- 名稱不是唯一鍵，不同創作者可以撞名
-- 網址也不是唯一辨識來源，平台搬家、換帳號、被 ban 都要保留歷史
-- 真正穩定的定位優先使用：
-  - `#creator_id`
-  - `platform:platform_id`
-  - 已知 URL
-- 名稱主要用來搜尋與顯示，不足以唯一定位時會拒絕寫入
+名稱歷史用 `creator_aliases` 表示：
+
+- `profile_id = NULL`：generic alias
+- `profile_id != NULL`：某個 profile 的名稱歷史
+
+貼文則必須掛在既有 profile 上，不能只掛 creator。
 
 ## 執行模式
 
-`clog` 有兩種入口：
-
-- 無參數：進入互動式 TUI
-- 有命令或查詢字串：走 CLI
+- `clog`：啟動 TUI
+- `clog ...`：走 CLI
 
 範例：
 
 ```bash
 clog
 clog a "creator name" https://x.com/example
-clog s example
-clog example
+clog n #1 "old alias"
+clog u #1 https://www.pixiv.net/users/123456
+clog p https://x.com/example/status/123
 ```
 
-## 主要檔案
-
-原始碼模式：
-
-- `clog.py`：入口點（thin wrapper）
-- `src/`：主要程式碼
-  - `constants.py`：例外類別、常數
-  - `config.py`：app_dir、logging、設定檔讀寫
-  - `utils.py`：字串/URL/解析工具函式
-  - `db.py`：SQLite schema 與所有查詢操作
-  - `gallery.py`：gallery-dl 整合
-  - `worker.py`：背景 metadata worker
-  - `service.py`：業務邏輯（add_* / set_* 記錄）
-  - `render.py`：資料 → 顯示字串
-  - `tui.py`：Textual TUI
-  - `cli.py`：CLI 命令、dispatch、main
-- `clog.json`：設定檔
-- `clog.sqlite`：SQLite 資料庫
-- `clog.log`：執行紀錄與錯誤 log
-
-打包模式（產物仍為單一 exe）：
-
-- `clog.exe` 或 Linux `clog`
-- `clog.json`
-- `clog.sqlite`
-- `clog.log`
-
-## 快速開始
-
-初始化：
-
-```bash
-clog init
-```
-
-新增創作者：
-
-```bash
-clog a erovirus https://www.patreon.com/cw/erovirus
-```
-
-查看主檔：
-
-```bash
-clog v erovirus
-clog v #1
-```
-
-搜尋：
-
-```bash
-clog s ero
-clog ero
-```
-
-設定提醒：
-
-```bash
-clog r #1 30d
-clog r #1 2026-05-01
-```
-
-新增整理記錄：
-
-```bash
-clog c #1 "整理 2026-04 贊助包" --tag pack --path D:\\archive\\creator
-```
-
-## 常用 CLI 命令
+## 常用命令
 
 | 功能 | 命令 |
 |---|---|
 | 初始化 | `clog i` / `clog init` |
-| 新增創作者 | `clog a NAME [URL]` |
-| 新增名稱事實 | `clog n TARGET NAME` |
-| 新增網址事實 | `clog u TARGET URL` |
-| 記錄貼文 | `clog p URL [TARGET]` |
+| 新增創作者 | `clog a NAME [URL] [--note TEXT]` |
+| 新增名稱 | `clog n TARGET NAME [CONTEXT]` |
+| 新增作者頁 URL | `clog u TARGET URL [--note TEXT]` |
+| 記錄貼文 | `clog p URL [TARGET] [--note TEXT]` |
 | 設提醒 | `clog r TARGET WHEN` |
-| 查看到期提醒 | `clog d` |
-| 近期清單 | `clog ls` / `clog l` |
-| 新增工作紀錄 | `clog c TARGET MESSAGE` |
-| 全局搜尋 | `clog s QUERY` |
+| 查看提醒 | `clog d` |
+| 近期清單 | `clog ls` |
+| 新增工作紀錄 | `clog c TARGET CONTENT` |
+| 搜尋 | `clog s QUERY` / `clog QUERY` |
 | 查看主檔 | `clog v TARGET` |
 
-## TARGET 定位規則
+## TARGET 解析
 
-大多數寫入命令都需要 `TARGET`。支援格式：
+大多數命令的 `TARGET` 支援：
 
 ```text
 #12
 https://platform/profile
 platform:platform_id
-精確或模糊名稱（前提是最後只命中一個創作者）
+名稱（前提是只命中一位 creator）
 ```
 
-如果同名或模糊結果命中多個創作者，工具不會猜，會要求你改用：
+如果同名或模糊命中多位 creator，程式會拒絕並列出候選，要求改用 `#id` / URL / `platform:platform_id`。
 
-- `#id`
-- 已知 URL
-- `platform:platform_id`
+## `add name`
 
-## 名稱、網址、平台 ID 的處理方式
-
-### 名稱
-
-`clog n` 用來追加名稱事實，不區分「別名」、「改名」、「新帳號名」為不同命令。可用參數補上下文：
+CLI 形式：
 
 ```bash
-clog n #1 "A1" -p fanbox --pid 123
-clog n #1 "A2" --from "A" -r rename
+clog n TARGET NAME
+clog n TARGET NAME pixiv
+clog n TARGET NAME https://site.example/creator-page
 ```
 
-### 網址
+語意：
 
-`clog u` 用來追加網址事實，也不區分「新平台」、「搬家」、「被 ban 後新帳號」為不同命令：
+- 沒有 `CONTEXT`
+  - 建立 generic alias
+- `CONTEXT` 是平台字串
+  - 在該 creator 底下找既有 profile
+  - 剛好一筆時，建立 profile-bound rename
+  - 0 筆或多筆都會拒絕
+- `CONTEXT` 是作者頁 URL
+  - 走 `add url` 的 profile attach pipeline
+  - 成功後把 alias 綁到該 profile
+
+TUI 形式：
+
+- 只能在目前選中的 creator 上操作
+- 使用者先輸入名稱
+- 再從「Generic Alias / 既有 profile / Via Author URL」三種路徑中選一條
+- 不提供自由輸入 platform / pid 欄位
+
+## `add url`
+
+CLI 形式：
 
 ```bash
-clog u #1 https://fanbox.cc/@example -p fanbox
-clog u #1 https://new.example --from https://old.example -r moved
+clog u TARGET URL [--note TEXT]
 ```
 
-### 平台帳號 ID
+規則：
 
-若平台有被 `gallery-dl` 支援，工具會盡量從 metadata 裡取出作者平台 ID，寫入 `platform_accounts`，後續就能用：
+- 只接受作者頁 URL，不接受使用者手填 platform / platform_id
+- 先 canonicalize，再用 gallery-dl extractor 類型判斷：
+  - `post-like`：拒絕，改用 `clog p`
+  - `profile-like` / `unknown`：允許
+- metadata 成功時：
+  - resolve 或 upsert resolved profile
+  - attach `profile_urls`
+- metadata 失敗或不足時：
+  - 仍建立 unresolved profile + profile_url
+
+## `add post`
+
+CLI 形式：
 
 ```bash
-clog v pixiv:123456
-clog u pixiv:123456 https://www.pixiv.net/users/123456
+clog p URL [TARGET] [--note TEXT]
 ```
 
-## 貼文記錄
+規則：
 
-`clog p URL [TARGET]` 會優先用 `gallery-dl` 做 metadata-only 擷取，盡量記錄：
+- 只接受 post URL
+- 一定會跑 gallery-dl metadata
+- post metadata 必須命中既有 `(platform, platform_id)` profile
+- 沒有既有 profile 就拒絕，提示先用 `add url` 或 `add name via URL`
+- `TARGET` 只拿來驗證命中的 profile 是否屬於該 creator，不能作 fallback
+- `add post` 不會補建或更新 profile / profile_url / alias
 
-- 平台
-- 作者名稱
-- 作者平台 ID
-- 貼文 ID
-- 標題
-- 文字內容
-- 發布時間
-- raw metadata JSON
+## TUI
 
-範例：
+TUI 目前已配合 profile-centric schema 更新：
 
-```bash
-clog p https://www.patreon.com/posts/123456 #1
-```
+- creator detail 會顯示 aliases、profiles、profile URLs、recent posts、recent work
+- `Add Name` 改成兩段式流程
+- `Add URL` 只保留 URL 與 note
+- `Record Post` 不再提供「只靠 TARGET 強掛 creator」的舊語意
+- 搜尋、recent tables、detail panel 都以 `profile` 為主要外部身份顯示單位
 
-行為規則：
+## Worklogs
 
-- 若 metadata 足夠定位創作者，會自動掛到正確主檔
-- 若 metadata 不足，但你有提供 `TARGET`，仍可建立最小貼文紀錄
-- 若 metadata 指向別的創作者，工具會拒絕寫入，不自動合併
+- `worklogs` 只綁 `creator_id`
+- 內容只存單一 `content` 欄位
+- `content` 保存 raw markdown source，現在先當純文字顯示
+- CLI/TUI 不再提供 tags / paths / urls / metadata JSON 的獨立輸入欄位
 
-## 互動式 TUI
-
-無參數執行：
-
-```bash
-clog
-```
-
-TUI 介面包含：
-
-- 上方搜尋列
-- 左側到期提醒與近期創作者
-- 中間搜尋 / creators / posts / work 分頁
-- 右側詳細資訊
-- modal 表單寫入 creator / name / url / post / reminder / work
-
-預設快捷鍵：
+快捷鍵：
 
 - `/`：回到搜尋框
-- `Ctrl+A`：新增創作者
+- `Ctrl+A`：新增 creator
 - `Ctrl+N`：新增名稱
-- `Ctrl+U`：新增網址
+- `Ctrl+U`：新增作者頁 URL
 - `Ctrl+P`：記錄貼文
 - `Ctrl+R`：設定提醒
 - `Ctrl+W`：新增工作紀錄
-- `[` / `]`：切換近期列表頁數
+- `[` / `]`：切換 recent list 頁數
 - `F5`：重新整理
 
-## 搜尋設計
+## 搜尋
 
-全局搜尋建立在 SQLite FTS5 之上，但輸出會以「創作者主檔」分組，而不是把底層 row 全部攤平。
+搜尋建立在 SQLite FTS5 上，輸出以 creator 分組。索引來源包含：
 
-搜尋來源包含：
+- creator
+- alias
+- profile
+- profile_url
+- post
+- reminder
+- work
 
-- creator 主檔
-- 名稱歷史
-- URL 歷史
-- 平台帳號
-- 貼文 metadata
-- 提醒
-- worklog
+## 資料表
 
-因此搜尋舊名、舊網址、平台 ID、貼文標題、整理記錄訊息，都有機會回到同一個創作者主檔。
+主要表如下：
 
-## 資料架構
+- `creators`
+- `creator_profiles`
+- `profile_urls`
+- `creator_aliases`
+- `posts`
+- `reminders`
+- `worklogs`
+- `profile_enrichment_jobs`
+- `search_fts`
 
-主要 SQLite 表：
+完整 ER 與欄位說明見 [docs/ER.md](docs/ER.md)。
 
-- `creators`：創作者主檔
-- `creator_names`：名稱事實與名稱歷史
-- `creator_urls`：網址事實與網址歷史
-- `platform_accounts`：平台帳號 ID 對應
-- `posts`：貼文 metadata
-- `reminders`：提醒
-- `worklogs`：整理 / 作業紀錄
-- `metadata_tasks`：背景 metadata 補全任務
-- `search_fts`：全局搜尋索引
+## 開發備註
 
-## 背景 metadata 補全
-
-當你新增 URL 或名稱時，只要有機會從網址中取得 metadata，工具會在背景啟動一次性 worker，自動補：
-
-- 平台
-- 平台作者 ID
-- 作者名稱
-- 作者頁 URL
-
-這樣可以在不拖慢高頻 CLI 操作的前提下，逐步把資料補完整。
-
-## 設計與實作架構
-
-- `clog.py`：入口點（thin wrapper，三行）
-- `src/`：模組化主程式碼，各模組職責單一
-- `clog.spec`：PyInstaller onefile 打包設定
-
-實作原則：
-
-- 原始碼分模組維護，打包產物為單一 exe
-- CLI 與 TUI 共用同一套資料處理邏輯（service / db 層）
-- 資料追加與歷史保留優先，不做破壞性覆蓋
-- 本地優先，不依賴外部服務
-
-## Log 與排錯
-
-程式會在執行目錄生成 `clog.log`，用於記錄：
-
-- 啟動 / 關閉
-- TUI action 開始與結束
-- 使用者錯誤
-- 未捕捉例外
-- 資料庫開啟 / 關閉
-
-SQLite 使用 WAL 模式，程式正常關閉時會做 checkpoint，避免長期殘留 `-wal` / `-shm`。
-
-如果 TUI 或 metadata 流程出問題，先看：
-
-- `clog.log`
-- `clog.sqlite`
-- 同目錄下是否有 `clog.sqlite-wal` / `clog.sqlite-shm`
+- 這版 schema 是 fresh baseline，不支援 migration
+- 若本機舊 dev DB 仍是舊格式，程式會直接報不相容，要求刪掉重建
+- metadata worker 只負責 profile 補全，不負責 post 歸屬以外的 side effect
 
 ## 原始碼執行
-
-需要 Python 3.12+。建議用 venv 隔離：
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate   # Windows
-# source .venv/bin/activate  # Linux/macOS
-pip install -r requirements.txt
-```
-
-`textual` 為 TUI 必要套件；`gallery-dl` 為貼文 metadata 補全功能所需。兩者皆為 optional import，CLI 命令不需要它們也能執行。
-
-範例：
 
 ```bash
 python clog.py init
@@ -316,26 +212,12 @@ python clog.py a example https://x.com/example
 python clog.py
 ```
 
-## 打包
+主要原始碼位於 `src/`：
 
-**注意**：`clog.spec` 使用 `collect_all()` 從當前 Python 環境收集套件。若環境未安裝依賴，PyInstaller 會靜默略過，打出的 exe 執行時會報 `No module named 'textual'` 等錯誤。
-
-Windows onefile 打包（乾淨 clone 後，使用 venv 隔離避免汙染 OS 環境）：
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python -m PyInstaller .\clog.spec --noconfirm
-deactivate
-```
-
-輸出在 `dist\clog.exe`。打包完成後可直接刪除 `.venv\`。
-
-輸出在：
-
-```text
-dist/clog.exe
-```
-
-Linux 版需要在 Linux 環境自行打包，不能直接用 Windows 的 PyInstaller 輸出交叉產生 Linux binary。
+- `db.py`：schema 與查詢
+- `service.py`：命令業務邏輯
+- `gallery.py`：gallery-dl 整合
+- `worker.py`：profile enrichment worker
+- `render.py`：detail rendering
+- `cli.py`：CLI dispatch
+- `tui.py`：Textual TUI

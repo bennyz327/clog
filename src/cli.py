@@ -13,9 +13,11 @@ from .db import (
     connect,
     creator_label,
     due_rows,
+    fetch_creator_snapshot,
     fetch_post_detail_row,
     fetch_work_detail_row,
     grouped_search,
+    profile_brief,
     recent_creators,
     recent_posts,
     recent_worklogs,
@@ -35,7 +37,6 @@ from .service import (
 from .tui import launch_tui
 from .utils import json_loads, make_parser, parse_known, prompt_input, shorten
 from .worker import process_metadata_tasks
-from .db import fetch_creator_snapshot
 
 
 # ── print helpers ─────────────────────────────────────────────────────────────
@@ -47,15 +48,12 @@ def print_grouped_search(groups: list[dict[str, Any]]) -> None:
         matches = format_kind_counts(group["kind_counts"])
         if matches:
             print(f"   matches: {matches}")
-        if group["names"]:
-            print(f"   names: {', '.join(group['names'])}")
-        if group["accounts"]:
-            print(f"   accounts: {', '.join(group['accounts'])}")
+        if group["aliases"]:
+            print(f"   aliases: {', '.join(group['aliases'])}")
+        if group["profiles"]:
+            print(f"   profiles: {'; '.join(group['profiles'])}")
         if group["urls"]:
-            url_text = "; ".join(
-                f"{platform or 'url'} {shorten(url, 80)}"
-                for platform, url in group["urls"]
-            )
+            url_text = "; ".join(shorten(url, 80) for url in group["urls"])
             print(f"   urls: {url_text}")
         if group["snippets"]:
             print(f"   hits: {'; '.join(group['snippets'])}")
@@ -102,7 +100,8 @@ def print_recent_creators(rows: list[sqlite3.Row]) -> None:
     for index, row in enumerate(rows, start=1):
         print(
             f"  {index}. #{row['id']} {row['primary_name']} [{row['status']}] "
-            f"updated={row['updated_at']} urls={row['url_count']} posts={row['post_count']} work={row['work_count']}"
+            f"updated={row['updated_at']} profiles={row['profile_count']} urls={row['url_count']} "
+            f"posts={row['post_count']} work={row['work_count']}"
         )
 
 
@@ -112,10 +111,10 @@ def print_recent_posts(rows: list[sqlite3.Row]) -> None:
         return
     for index, row in enumerate(rows, start=1):
         title = row["title"] or row["url"]
-        platform = f"{row['platform']} " if row["platform"] else ""
+        profile = profile_brief(row["platform"], row["platform_id"], row["display_name"])
         print(
             f"  {index}. post:{row['id']} #{row['creator_id']} {row['primary_name']} "
-            f"{platform}{shorten(title, 90)} captured={row['captured_at']}"
+            f"[{profile}] {shorten(title, 90)} captured={row['captured_at']}"
         )
 
 
@@ -124,11 +123,9 @@ def print_recent_worklogs(rows: list[sqlite3.Row]) -> None:
         print("  (none)")
         return
     for index, row in enumerate(rows, start=1):
-        tags = json_loads(row["tags_json"], [])
-        tag_text = f" tags={','.join(tags)}" if tags else ""
         print(
             f"  {index}. work:{row['id']} #{row['creator_id']} {row['primary_name']} "
-            f"{shorten(row['message'], 90)}{tag_text} at={row['created_at']}"
+            f"{shorten(row['content'], 90)} at={row['created_at']}"
         )
 
 
@@ -185,15 +182,17 @@ Usage:
 Commands:
   i, init             initialize config and database
   a, add NAME [URL]   add creator
-  n, name TARGET NAME add name fact
-  u, url TARGET URL   add URL fact
+  n, name TARGET NAME [CONTEXT]
+                      add generic alias, rename an existing profile, or add via creator URL
+  u, url TARGET URL   attach creator URL to a profile
   p, post URL [TARGET]
-                      record post metadata with gallery-dl when available
+                      record post only when metadata matches an existing profile
   r, remind TARGET WHEN
                       set reminder; WHEN = YYYY-MM-DD, today, tomorrow, Nd
   d, due              show due reminders
   ls, l               recent creators/posts/work with interactive browser
-  c, work TARGET MSG  add commit-like work log
+  c, work TARGET CONTENT
+                      add creator-level work log content
   s, search QUERY     grouped global search (-i choose, -v show if unique, --raw debug)
   v, show TARGET      show creator main record
 
@@ -303,14 +302,14 @@ def cmd_add(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
     parser = make_parser("clog add")
     parser.add_argument("name")
     parser.add_argument("url", nargs="?")
-    parser.add_argument("-p", "--platform")
-    parser.add_argument("--pid")
     parser.add_argument("--note")
     ns = parse_known(parser, args)
     result = add_creator_record(
         conn, db_path, ns.name,
-        url=ns.url, platform=ns.platform, platform_id=ns.pid, note=ns.note,
+        url=ns.url, note=ns.note,
     )
+    if result.get("warning"):
+        print(f"warning: {result['warning']}")
     print(f"added {creator_label(conn, result['creator_id'])}")
 
 
@@ -318,42 +317,30 @@ def cmd_name(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
     parser = make_parser("clog name")
     parser.add_argument("target")
     parser.add_argument("name")
-    parser.add_argument("-p", "--platform")
-    parser.add_argument("--pid")
-    parser.add_argument("-u", "--url")
-    parser.add_argument("--from", dest="from_name")
-    parser.add_argument("-r", "--reason")
-    parser.add_argument("--status", default="active")
-    parser.add_argument("--note")
+    parser.add_argument("context", nargs="?")
     ns = parse_known(parser, args)
     result = add_name_record(
         conn, db_path, ns.target, ns.name,
-        platform=ns.platform, platform_id=ns.pid,
-        url=ns.url, from_name=ns.from_name,
-        reason=ns.reason, status=ns.status, note=ns.note,
+        context=ns.context,
     )
-    print(f"added name #{result['name_id']} to {creator_label(conn, result['creator_id'])}")
+    if result.get("warning"):
+        print(f"warning: {result['warning']}")
+    print(f"added alias #{result['alias_id']} to {creator_label(conn, result['creator_id'])}")
 
 
 def cmd_url(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
     parser = make_parser("clog url")
     parser.add_argument("target")
     parser.add_argument("url")
-    parser.add_argument("-p", "--platform")
-    parser.add_argument("--pid")
-    parser.add_argument("--from", dest="from_url")
-    parser.add_argument("-r", "--reason")
-    parser.add_argument("--status", default="active")
-    parser.add_argument("--name")
     parser.add_argument("--note")
     ns = parse_known(parser, args)
     result = add_url_record(
         conn, db_path, ns.target, ns.url,
-        platform=ns.platform, platform_id=ns.pid,
-        name=ns.name, from_url=ns.from_url,
-        reason=ns.reason, status=ns.status, note=ns.note,
+        note=ns.note,
     )
-    print(f"added url #{result['url_id']} to {creator_label(conn, result['creator_id'])}")
+    if result.get("warning"):
+        print(f"warning: {result['warning']}")
+    print(f"attached url #{result['url_id']} to {creator_label(conn, result['creator_id'])}")
 
 
 def cmd_post(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
@@ -367,7 +354,7 @@ def cmd_post(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
         conn, db_path, ns.url,
         target=ns.target, note=ns.note, timeout=ns.timeout,
     )
-    if result["warning"]:
+    if result.get("warning"):
         print(f"warning: {result['warning']}")
     print(f"recorded post #{result['post_id']} for {creator_label(conn, result['creator_id'])}")
 
@@ -410,21 +397,10 @@ def cmd_ls(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
 def cmd_work(conn: sqlite3.Connection, _db_path: Path, args: list[str]) -> None:
     parser = make_parser("clog work")
     parser.add_argument("target")
-    parser.add_argument("message")
-    parser.add_argument("--tag", action="append", default=[])
-    parser.add_argument("--path", action="append", default=[])
-    parser.add_argument("--url", action="append", default=[])
-    parser.add_argument("--meta")
+    parser.add_argument("content")
     ns = parse_known(parser, args)
-    metadata = None
-    if ns.meta:
-        try:
-            metadata = json.loads(ns.meta)
-        except json.JSONDecodeError as exc:
-            raise UserError("--meta must be valid JSON") from exc
     result = add_work_record(
-        conn, ns.target, ns.message,
-        tags=ns.tag, paths=ns.path, urls=ns.url, metadata=metadata,
+        conn, ns.target, ns.content,
     )
     print(f"recorded work #{result['work_id']} for {creator_label(conn, result['creator_id'])}")
 
@@ -497,11 +473,11 @@ def cmd_home(conn: sqlite3.Connection) -> None:
     print("")
     print("quick commands:")
     print("  clog a NAME [URL]              add creator")
-    print("  clog n TARGET NAME             add name fact")
-    print("  clog u TARGET URL              add URL fact")
-    print("  clog p URL [TARGET]            record post metadata")
+    print("  clog n TARGET NAME [CONTEXT]   add alias or profile rename")
+    print("  clog u TARGET URL              attach creator URL")
+    print("  clog p URL [TARGET]            record post against existing profile")
     print("  clog r TARGET WHEN             set reminder")
-    print("  clog c TARGET MESSAGE          add work log")
+    print("  clog c TARGET CONTENT          add work log")
     print("  clog ls                        recent lists + interactive browser")
     print("  clog s QUERY / clog QUERY      global search")
     print("  clog v TARGET                  show creator")

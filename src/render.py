@@ -4,11 +4,12 @@ import json
 import sqlite3
 from typing import Any
 
+from .db import profile_brief
 from .utils import json_loads, shorten
 
 
 def format_kind_counts(kind_counts: dict[str, int]) -> str:
-    order = ["creator", "account", "name", "url", "post", "work", "reminder"]
+    order = ["creator", "profile", "profile_url", "alias", "post", "work", "reminder"]
     parts: list[str] = []
     for kind in order:
         count = kind_counts.get(kind)
@@ -20,13 +21,6 @@ def format_kind_counts(kind_counts: dict[str, int]) -> str:
     return ", ".join(parts)
 
 
-def _fmt_tags(json_val: Any) -> str:
-    items = json_loads(json_val, [])
-    if isinstance(items, list) and items:
-        return " ".join(f"#{t}" for t in items if t)
-    return ""
-
-
 def render_creator_snapshot(snapshot: dict[str, Any]) -> str:
     creator = snapshot["creator"]
     lines = [f"#{creator['id']}  {creator['primary_name']}  [{creator['status']}]"]
@@ -34,18 +28,24 @@ def render_creator_snapshot(snapshot: dict[str, Any]) -> str:
         lines.append(f"  note: {creator['note']}")
 
     lines.append("")
-    lines.append("── names ──────────────────────────────")
-    names = snapshot["names"]
-    if not names:
+    lines.append("── aliases ─────────────────────────────")
+    aliases = snapshot["aliases"]
+    if not aliases:
         lines.append("  (none)")
     else:
-        for row in names:
-            pid_part = (
-                f"  ({row['platform']}:{row['platform_id']})" if row["platform"] and row["platform_id"]
-                else (f"  ({row['platform']})" if row["platform"] else "")
-            )
-            lines.append(f"  [{row['id']}] {row['name']}{pid_part}")
+        for row in aliases:
+            lines.append(f"  [{row['id']}] {row['name']}")
             meta_parts = []
+            if row["profile_id"]:
+                meta_parts.append(
+                    profile_brief(
+                        row["platform"],
+                        row["platform_id"],
+                        row["display_name"],
+                    )
+                )
+            else:
+                meta_parts.append("generic")
             if row["reason"] not in (None, ""):
                 meta_parts.append(str(row["reason"]))
             if row["status"] not in (None, "", "active"):
@@ -58,45 +58,38 @@ def render_creator_snapshot(snapshot: dict[str, Any]) -> str:
                 lines.append(f"      {' · '.join(meta_parts)}")
 
     lines.append("")
-    lines.append("── urls ────────────────────────────────")
-    urls = snapshot["urls"]
-    if not urls:
+    lines.append("── profiles ────────────────────────────")
+    profiles = snapshot["profiles"]
+    if not profiles:
         lines.append("  (none)")
     else:
-        for row in urls:
-            lines.append(f"  [{row['id']}] {shorten(row['url'], 60)}")
-            sub_parts = []
-            if row["platform"] not in (None, ""):
-                pid = f":{row['platform_id']}" if row["platform_id"] not in (None, "") else ""
-                sub_parts.append(f"{row['platform']}{pid}")
+        for row in profiles:
+            lines.append(
+                f"  [{row['id']}] "
+                f"{profile_brief(row['platform'], row['platform_id'], row['display_name'], row['primary_url'])}"
+            )
+            sub_parts = [row["identity_state"]]
             if row["status"] not in (None, "", "active"):
                 sub_parts.append(str(row["status"]))
-            if row["reason"] not in (None, ""):
-                sub_parts.append(str(row["reason"]))
-            if row["from_url"] not in (None, ""):
-                sub_parts.append(f"from: {shorten(row['from_url'], 40)}")
+            if row["source"] not in (None, ""):
+                sub_parts.append(f"via {row['source']}")
             if row["note"] not in (None, ""):
                 sub_parts.append(f"note: {row['note']}")
             if sub_parts:
                 lines.append(f"      {' · '.join(sub_parts)}")
-
-    lines.append("")
-    lines.append("── platform accounts ───────────────────")
-    accounts = snapshot["accounts"]
-    if not accounts:
-        lines.append("  (none)")
-    else:
-        for row in accounts:
-            lines.append(f"  {row['platform']}:{row['platform_id']}")
-            sub_parts = []
-            if row["display_name"] not in (None, ""):
-                sub_parts.append(str(row["display_name"]))
-            if row["profile_url"] not in (None, ""):
-                sub_parts.append(shorten(row["profile_url"], 50))
-            if row["source"] not in (None, ""):
-                sub_parts.append(f"via {row['source']}")
-            if sub_parts:
-                lines.append(f"      {' · '.join(sub_parts)}")
+            urls = row["urls"]
+            if not urls:
+                lines.append("      url: (none)")
+            else:
+                for url_row in urls:
+                    url_parts = [shorten(url_row["url"], 60)]
+                    if url_row["reason"] not in (None, ""):
+                        url_parts.append(str(url_row["reason"]))
+                    if url_row["status"] not in (None, "", "active"):
+                        url_parts.append(str(url_row["status"]))
+                    if url_row["note"] not in (None, ""):
+                        url_parts.append(f"note: {url_row['note']}")
+                    lines.append(f"      url: {' · '.join(url_parts)}")
 
     lines.append("")
     lines.append("── reminder ────────────────────────────")
@@ -108,7 +101,7 @@ def render_creator_snapshot(snapshot: dict[str, Any]) -> str:
         if reminder["interval_days"] not in (None, ""):
             due_line += f"  (every {reminder['interval_days']}d)"
         if reminder["note"] not in (None, ""):
-            due_line += f"  — {reminder['note']}"
+            due_line += f"  | {reminder['note']}"
         lines.append(due_line)
 
     lines.append("")
@@ -119,9 +112,9 @@ def render_creator_snapshot(snapshot: dict[str, Any]) -> str:
     else:
         for row in posts:
             label = shorten(row["title"] or row["url"], 45)
-            plat = f"  [{row['platform']}]" if row["platform"] not in (None, "") else ""
+            profile_text = profile_brief(row["platform"], row["platform_id"], row["display_name"])
             date = f"  {row['posted_at'][:10]}" if row["posted_at"] not in (None, "") else ""
-            lines.append(f"  [{row['id']}] {label}{plat}{date}")
+            lines.append(f"  [{row['id']}] {label}  [{profile_text}]{date}")
 
     lines.append("")
     lines.append("── recent work ─────────────────────────")
@@ -130,19 +123,21 @@ def render_creator_snapshot(snapshot: dict[str, Any]) -> str:
         lines.append("  (none)")
     else:
         for row in work:
-            tags = _fmt_tags(row["tags_json"])
             date = str(row["created_at"])[:10] if row["created_at"] else ""
-            suffix_parts = [p for p in [tags, date] if p]
+            suffix_parts = [part for part in [date] if part]
             suffix = "  " + "  ".join(suffix_parts) if suffix_parts else ""
-            lines.append(f"  [{row['id']}] {shorten(row['message'], 50)}{suffix}")
+            lines.append(f"  [{row['id']}] {shorten(row['content'], 50)}{suffix}")
 
     return "\n".join(lines)
 
 
 def render_post_detail(row: sqlite3.Row) -> str:
-    lines = [f"post:{row['id']} for #{row['creator_id']} {row['primary_name']}"]
-    for col in ["url", "platform", "platform_post_id", "author_platform_id", "author_name",
-                "title", "text", "posted_at", "captured_at", "note", "created_at", "updated_at"]:
+    profile_text = profile_brief(row["platform"], row["platform_id"], row["display_name"])
+    lines = [
+        f"post:{row['id']} for #{row['creator_id']} {row['primary_name']}",
+        f"profile: {profile_text}",
+    ]
+    for col in ["url", "platform_post_id", "title", "text", "posted_at", "captured_at", "note", "created_at", "updated_at"]:
         if row[col] not in (None, ""):
             lines.append(f"{col}: {shorten(row[col], 400)}")
     metadata = json_loads(row["metadata_json"], None)
@@ -153,17 +148,13 @@ def render_post_detail(row: sqlite3.Row) -> str:
 
 
 def render_work_detail(row: sqlite3.Row) -> str:
-    lines = [f"work:{row['id']} for #{row['creator_id']} {row['primary_name']}", f"message: {row['message']}"]
-    for label, col in [("tags", "tags_json"), ("paths", "paths_json"), ("urls", "urls_json")]:
-        value = json_loads(row[col], [])
-        if value:
-            lines.append(f"{label}: {', '.join(str(x) for x in value)}")
+    lines = [
+        f"work:{row['id']} for #{row['creator_id']} {row['primary_name']}",
+        "content:",
+        str(row["content"] or ""),
+    ]
     if row["created_at"]:
         lines.append(f"created_at: {row['created_at']}")
     if row["updated_at"]:
         lines.append(f"updated_at: {row['updated_at']}")
-    metadata = json_loads(row["metadata_json"], None)
-    if metadata is not None:
-        lines.append("metadata:")
-        lines.append(shorten(json.dumps(metadata, ensure_ascii=False, indent=2), 6000))
     return "\n".join(lines)

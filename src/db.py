@@ -6,12 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import LOGGER
-from .constants import (
-    SCHEMA_VERSION,
-    AmbiguousTarget,
-    ConflictError,
-    UserError,
-)
+from .constants import AmbiguousTarget, ConflictError, SCHEMA_VERSION, UserError
 from .utils import (
     canonical_url,
     infer_platform_from_url,
@@ -39,13 +34,42 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS app_meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
-        );
+        )
+        """
+    )
+    version_row = conn.execute(
+        "SELECT value FROM app_meta WHERE key = 'schema_version'"
+    ).fetchone()
+    existing_tables = [
+        row["name"]
+        for row in conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT LIKE 'sqlite_%'
+              AND name != 'app_meta'
+            """
+        )
+    ]
+    expected_version = str(SCHEMA_VERSION)
+    if version_row and str(version_row["value"]) != expected_version:
+        raise UserError(
+            f"DB schema {version_row['value']} is incompatible with this build. "
+            "Delete the development DB file and run `clog init` again."
+        )
+    if not version_row and existing_tables:
+        raise UserError(
+            "Existing DB schema is incompatible with this build. "
+            "Delete the development DB file and run `clog init` again."
+        )
 
+    conn.executescript(
+        """
         CREATE TABLE IF NOT EXISTS creators (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             primary_name TEXT NOT NULL,
@@ -55,54 +79,17 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS creator_names (
+        CREATE TABLE IF NOT EXISTS creator_profiles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             creator_id INTEGER NOT NULL REFERENCES creators(id) ON DELETE CASCADE,
-            name TEXT NOT NULL,
             platform TEXT,
             platform_id TEXT,
-            url TEXT,
-            canonical_url TEXT,
-            from_name TEXT,
-            reason TEXT,
-            status TEXT NOT NULL DEFAULT 'active',
-            note TEXT,
-            metadata_json TEXT,
-            first_seen_at TEXT NOT NULL,
-            last_seen_at TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS creator_urls (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            creator_id INTEGER NOT NULL REFERENCES creators(id) ON DELETE CASCADE,
-            url TEXT NOT NULL,
-            canonical_url TEXT NOT NULL UNIQUE,
-            platform TEXT,
-            platform_id TEXT,
-            name TEXT,
-            from_url TEXT,
-            reason TEXT,
-            status TEXT NOT NULL DEFAULT 'active',
-            note TEXT,
-            metadata_json TEXT,
-            first_seen_at TEXT NOT NULL,
-            last_seen_at TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS platform_accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            creator_id INTEGER NOT NULL REFERENCES creators(id) ON DELETE CASCADE,
-            platform TEXT NOT NULL,
-            platform_id TEXT NOT NULL,
             display_name TEXT,
-            profile_url TEXT,
-            profile_canonical_url TEXT,
             source TEXT,
-            metadata_json TEXT,
+            identity_state TEXT NOT NULL DEFAULT 'unresolved',
+            status TEXT NOT NULL DEFAULT 'active',
+            note TEXT,
+            last_metadata_json TEXT,
             first_seen_at TEXT NOT NULL,
             last_seen_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
@@ -110,15 +97,43 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(platform, platform_id)
         );
 
+        CREATE TABLE IF NOT EXISTS profile_urls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id INTEGER NOT NULL REFERENCES creator_profiles(id) ON DELETE CASCADE,
+            url TEXT NOT NULL,
+            canonical_url TEXT NOT NULL UNIQUE,
+            from_url TEXT,
+            reason TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            note TEXT,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS creator_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            creator_id INTEGER NOT NULL REFERENCES creators(id) ON DELETE CASCADE,
+            profile_id INTEGER REFERENCES creator_profiles(id) ON DELETE SET NULL,
+            name TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            note TEXT,
+            from_name TEXT,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS posts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             creator_id INTEGER NOT NULL REFERENCES creators(id) ON DELETE CASCADE,
+            profile_id INTEGER NOT NULL REFERENCES creator_profiles(id) ON DELETE CASCADE,
             url TEXT NOT NULL,
             canonical_url TEXT NOT NULL UNIQUE,
-            platform TEXT,
             platform_post_id TEXT,
-            author_platform_id TEXT,
-            author_name TEXT,
             title TEXT,
             text TEXT,
             posted_at TEXT,
@@ -143,22 +158,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS worklogs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             creator_id INTEGER NOT NULL REFERENCES creators(id) ON DELETE CASCADE,
-            message TEXT NOT NULL,
-            tags_json TEXT,
-            paths_json TEXT,
-            urls_json TEXT,
-            metadata_json TEXT,
+            content TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS metadata_tasks (
+        CREATE TABLE IF NOT EXISTS profile_enrichment_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            creator_id INTEGER NOT NULL REFERENCES creators(id) ON DELETE CASCADE,
-            target_kind TEXT NOT NULL,
-            target_row_id INTEGER NOT NULL,
-            url TEXT NOT NULL,
-            canonical_url TEXT NOT NULL,
+            profile_url_id INTEGER NOT NULL UNIQUE REFERENCES profile_urls(id) ON DELETE CASCADE,
             status TEXT NOT NULL DEFAULT 'pending',
             attempts INTEGER NOT NULL DEFAULT 0,
             last_error TEXT,
@@ -166,16 +173,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS idx_creator_names_creator ON creator_names(creator_id);
-        CREATE INDEX IF NOT EXISTS idx_creator_names_name ON creator_names(name);
-        CREATE INDEX IF NOT EXISTS idx_creator_urls_creator ON creator_urls(creator_id);
-        CREATE INDEX IF NOT EXISTS idx_creator_urls_status ON creator_urls(status);
-        CREATE INDEX IF NOT EXISTS idx_platform_accounts_creator ON platform_accounts(creator_id);
-        CREATE INDEX IF NOT EXISTS idx_platform_accounts_profile ON platform_accounts(profile_canonical_url);
+        CREATE INDEX IF NOT EXISTS idx_creator_aliases_creator ON creator_aliases(creator_id);
+        CREATE INDEX IF NOT EXISTS idx_creator_aliases_name ON creator_aliases(name);
+        CREATE INDEX IF NOT EXISTS idx_creator_profiles_creator ON creator_profiles(creator_id);
+        CREATE INDEX IF NOT EXISTS idx_creator_profiles_platform ON creator_profiles(platform);
+        CREATE INDEX IF NOT EXISTS idx_profile_urls_profile ON profile_urls(profile_id);
         CREATE INDEX IF NOT EXISTS idx_posts_creator ON posts(creator_id);
+        CREATE INDEX IF NOT EXISTS idx_posts_profile ON posts(profile_id);
         CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(next_due_at);
         CREATE INDEX IF NOT EXISTS idx_worklogs_creator ON worklogs(creator_id);
-        CREATE INDEX IF NOT EXISTS idx_metadata_tasks_status ON metadata_tasks(status, attempts);
+        CREATE INDEX IF NOT EXISTS idx_profile_jobs_status ON profile_enrichment_jobs(status, attempts);
 
         CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
             kind UNINDEXED,
@@ -189,12 +196,17 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "INSERT OR REPLACE INTO app_meta(key, value) VALUES('schema_version', ?)",
-        (str(SCHEMA_VERSION),),
+        (expected_version,),
     )
     conn.commit()
 
 
-# ── creator lookup ────────────────────────────────────────────────────────────
+def require_lastrowid(cur: sqlite3.Cursor) -> int:
+    rowid = cur.lastrowid
+    if rowid is None:
+        raise RuntimeError("insert did not produce lastrowid")
+    return int(rowid)
+
 
 def creator_exists(conn: sqlite3.Connection, creator_id: int) -> bool:
     row = conn.execute("SELECT 1 FROM creators WHERE id = ?", (creator_id,)).fetchone()
@@ -210,68 +222,171 @@ def creator_label(conn: sqlite3.Connection, creator_id: int) -> str:
     return f"#{row['id']} {row['primary_name']}"
 
 
-def candidate_lines(conn: sqlite3.Connection, creator_ids: list[int]) -> list[str]:
-    lines: list[str] = []
-    for cid in creator_ids[:10]:
-        creator = conn.execute(
-            "SELECT id, primary_name, status FROM creators WHERE id = ?", (cid,)
-        ).fetchone()
-        if not creator:
-            continue
-        names = [
-            r["name"]
-            for r in conn.execute(
-                "SELECT DISTINCT name FROM creator_names WHERE creator_id = ? ORDER BY id DESC LIMIT 4",
-                (cid,),
-            )
-        ]
-        accounts = [
-            f"{r['platform']}:{r['platform_id']}"
-            for r in conn.execute(
-                "SELECT platform, platform_id FROM platform_accounts WHERE creator_id = ? ORDER BY updated_at DESC LIMIT 3",
-                (cid,),
-            )
-        ]
-        urls = [
-            shorten(r["url"], 60)
-            for r in conn.execute(
-                "SELECT url FROM creator_urls WHERE creator_id = ? ORDER BY updated_at DESC LIMIT 2",
-                (cid,),
-            )
-        ]
-        detail = " | ".join(part for part in [", ".join(names), ", ".join(accounts), ", ".join(urls)] if part)
-        lines.append(f"  #{creator['id']} {creator['primary_name']}" + (f" ({detail})" if detail else ""))
-    if len(creator_ids) > 10:
-        lines.append(f"  ... and {len(creator_ids) - 10} more")
-    return lines
+def touch_creator(conn: sqlite3.Connection, creator_id: int, *, ts: str | None = None) -> None:
+    conn.execute(
+        "UPDATE creators SET updated_at = ? WHERE id = ?",
+        (ts or now_iso(), creator_id),
+    )
 
 
-def platform_account_creator(
-    conn: sqlite3.Connection, platform: str | None, platform_id: str | None
-) -> int | None:
+def profile_identity_text(platform: str | None, platform_id: str | None) -> str:
+    if platform and platform_id:
+        return f"{platform}:{platform_id}"
+    if platform:
+        return platform
+    return "unresolved"
+
+
+def profile_brief(
+    platform: str | None,
+    platform_id: str | None,
+    display_name: str | None = None,
+    url: str | None = None,
+) -> str:
+    parts = [profile_identity_text(platform, platform_id)]
+    if display_name:
+        parts.append(display_name)
+    if url:
+        parts.append(shorten(url, 60))
+    return " | ".join(parts)
+
+
+def profile_row(conn: sqlite3.Connection, profile_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT p.*,
+               c.primary_name,
+               (
+                   SELECT u.url
+                   FROM profile_urls u
+                   WHERE u.profile_id = p.id
+                   ORDER BY u.updated_at DESC, u.id DESC
+                   LIMIT 1
+               ) AS primary_url
+        FROM creator_profiles p
+        JOIN creators c ON c.id = p.creator_id
+        WHERE p.id = ?
+        """,
+        (profile_id,),
+    ).fetchone()
+
+
+def profile_row_by_identity(
+    conn: sqlite3.Connection,
+    platform: str | None,
+    platform_id: str | None,
+) -> sqlite3.Row | None:
     platform = normalize_platform(platform)
     platform_id = normalize_pid(platform_id)
     if not platform or not platform_id:
         return None
-    row = conn.execute(
-        "SELECT creator_id FROM platform_accounts WHERE platform = ? AND platform_id = ?",
+    return conn.execute(
+        """
+        SELECT p.*,
+               (
+                   SELECT u.url
+                   FROM profile_urls u
+                   WHERE u.profile_id = p.id
+                   ORDER BY u.updated_at DESC, u.id DESC
+                   LIMIT 1
+               ) AS primary_url
+        FROM creator_profiles p
+        WHERE p.platform = ? AND p.platform_id = ?
+        """,
         (platform, platform_id),
     ).fetchone()
-    return int(row["creator_id"]) if row else None
+
+
+def profile_rows_by_creator(
+    conn: sqlite3.Connection,
+    creator_id: int,
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT p.*,
+               (
+                   SELECT u.url
+                   FROM profile_urls u
+                   WHERE u.profile_id = p.id
+                   ORDER BY u.updated_at DESC, u.id DESC
+                   LIMIT 1
+               ) AS primary_url
+        FROM creator_profiles p
+        WHERE p.creator_id = ?
+        ORDER BY p.updated_at DESC, p.id DESC
+        """,
+        (creator_id,),
+    ).fetchall()
+
+
+def profile_rows_by_creator_platform(
+    conn: sqlite3.Connection,
+    creator_id: int,
+    platform: str,
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT p.*,
+               (
+                   SELECT u.url
+                   FROM profile_urls u
+                   WHERE u.profile_id = p.id
+                   ORDER BY u.updated_at DESC, u.id DESC
+                   LIMIT 1
+               ) AS primary_url
+        FROM creator_profiles p
+        WHERE p.creator_id = ? AND p.platform = ?
+        ORDER BY p.updated_at DESC, p.id DESC
+        """,
+        (creator_id, normalize_platform(platform)),
+    ).fetchall()
+
+
+def profile_url_row_by_canonical(
+    conn: sqlite3.Connection,
+    canonical: str,
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT u.*,
+               p.creator_id,
+               p.platform,
+               p.platform_id,
+               p.display_name,
+               p.identity_state,
+               c.primary_name
+        FROM profile_urls u
+        JOIN creator_profiles p ON p.id = u.profile_id
+        JOIN creators c ON c.id = p.creator_id
+        WHERE u.canonical_url = ?
+        """,
+        (canonical,),
+    ).fetchone()
+
+
+def profile_url_rows_for_profile(
+    conn: sqlite3.Connection,
+    profile_id: int,
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT *
+        FROM profile_urls
+        WHERE profile_id = ?
+        ORDER BY updated_at DESC, id DESC
+        """,
+        (profile_id,),
+    ).fetchall()
 
 
 def creator_ids_by_url(conn: sqlite3.Connection, value: str) -> list[int]:
     canon = canonical_url(value)
     if not canon:
         return []
-    ids: list[int] = []
-    for row in conn.execute("SELECT creator_id FROM creator_urls WHERE canonical_url = ?", (canon,)):
-        ids.append(int(row["creator_id"]))
-    for row in conn.execute(
-        "SELECT creator_id FROM platform_accounts WHERE profile_canonical_url = ?", (canon,)
-    ):
-        ids.append(int(row["creator_id"]))
-    return sorted(set(ids))
+    row = profile_url_row_by_canonical(conn, canon)
+    if row is None:
+        return []
+    return [int(row["creator_id"])]
 
 
 def creator_ids_by_name(conn: sqlite3.Connection, value: str) -> list[int]:
@@ -279,17 +394,30 @@ def creator_ids_by_name(conn: sqlite3.Connection, value: str) -> list[int]:
     if not q:
         return []
     exact: set[int] = set()
-    for row in conn.execute("SELECT id FROM creators WHERE lower(primary_name) = lower(?)", (q,)):
+    for row in conn.execute(
+        "SELECT id FROM creators WHERE lower(primary_name) = lower(?)",
+        (q,),
+    ):
         exact.add(int(row["id"]))
-    for row in conn.execute("SELECT creator_id FROM creator_names WHERE lower(name) = lower(?)", (q,)):
+    for row in conn.execute(
+        "SELECT creator_id FROM creator_aliases WHERE lower(name) = lower(?)",
+        (q,),
+    ):
         exact.add(int(row["creator_id"]))
     if exact:
         return sorted(exact)
+
     like = f"%{q}%"
     fuzzy: set[int] = set()
-    for row in conn.execute("SELECT id FROM creators WHERE primary_name LIKE ? LIMIT 20", (like,)):
+    for row in conn.execute(
+        "SELECT id FROM creators WHERE primary_name LIKE ? LIMIT 20",
+        (like,),
+    ):
         fuzzy.add(int(row["id"]))
-    for row in conn.execute("SELECT creator_id FROM creator_names WHERE name LIKE ? LIMIT 20", (like,)):
+    for row in conn.execute(
+        "SELECT creator_id FROM creator_aliases WHERE name LIKE ? LIMIT 20",
+        (like,),
+    ):
         fuzzy.add(int(row["creator_id"]))
     return sorted(fuzzy)
 
@@ -307,13 +435,7 @@ def parse_platform_target(value: str) -> tuple[str, str] | None:
     return platform, platform_id
 
 
-def resolve_target(
-    conn: sqlite3.Connection,
-    target: str,
-    *,
-    platform: str | None = None,
-    platform_id: str | None = None,
-) -> int:
+def resolve_target(conn: sqlite3.Connection, target: str) -> int:
     target = target.strip()
     if not target:
         raise UserError("Target is empty")
@@ -337,14 +459,10 @@ def resolve_target(
 
     parsed = parse_platform_target(target)
     if parsed:
-        cid = platform_account_creator(conn, parsed[0], parsed[1])
-        if cid is None:
+        row = profile_row_by_identity(conn, parsed[0], parsed[1])
+        if row is None:
             raise UserError(f"No creator is linked to platform id: {target}")
-        return cid
-
-    cid = platform_account_creator(conn, platform, platform_id)
-    if cid is not None:
-        return cid
+        return int(row["creator_id"])
 
     ids = creator_ids_by_name(conn, target)
     if len(ids) == 1:
@@ -354,13 +472,64 @@ def resolve_target(
     raise UserError(f"Creator not found: {target}")
 
 
-# ── write operations ──────────────────────────────────────────────────────────
+def candidate_lines(conn: sqlite3.Connection, creator_ids: list[int]) -> list[str]:
+    lines: list[str] = []
+    for cid in creator_ids[:10]:
+        creator = conn.execute(
+            "SELECT id, primary_name FROM creators WHERE id = ?",
+            (cid,),
+        ).fetchone()
+        if creator is None:
+            continue
+        names = [
+            row["name"]
+            for row in conn.execute(
+                """
+                SELECT DISTINCT name
+                FROM creator_aliases
+                WHERE creator_id = ?
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 4
+                """,
+                (cid,),
+            )
+        ]
+        profiles = [
+            profile_brief(
+                row["platform"],
+                row["platform_id"],
+                row["display_name"],
+                row["primary_url"],
+            )
+            for row in profile_rows_by_creator(conn, cid)[:3]
+        ]
+        urls = [
+            shorten(row["url"], 60)
+            for row in conn.execute(
+                """
+                SELECT u.url
+                FROM profile_urls u
+                JOIN creator_profiles p ON p.id = u.profile_id
+                WHERE p.creator_id = ?
+                ORDER BY u.updated_at DESC, u.id DESC
+                LIMIT 2
+                """,
+                (cid,),
+            )
+        ]
+        detail = " | ".join(
+            part
+            for part in [", ".join(names), "; ".join(profiles), ", ".join(urls)]
+            if part
+        )
+        lines.append(
+            f"  #{creator['id']} {creator['primary_name']}"
+            + (f" ({detail})" if detail else "")
+        )
+    if len(creator_ids) > 10:
+        lines.append(f"  ... and {len(creator_ids) - 10} more")
+    return lines
 
-def require_lastrowid(cur: sqlite3.Cursor) -> int:
-    rowid = cur.lastrowid
-    if rowid is None:
-        raise RuntimeError("insert did not produce lastrowid")
-    return int(rowid)
 
 def insert_creator(conn: sqlite3.Connection, name: str, note: str | None = None) -> int:
     ts = now_iso()
@@ -369,246 +538,298 @@ def insert_creator(conn: sqlite3.Connection, name: str, note: str | None = None)
         (name, note, ts, ts),
     )
     creator_id = require_lastrowid(cur)
-    insert_name_fact(conn, creator_id, name, reason="initial", note=note)
+    insert_alias(
+        conn,
+        creator_id,
+        name,
+        reason="initial",
+        note=note,
+    )
     return creator_id
 
 
-def insert_name_fact(
+def insert_alias(
     conn: sqlite3.Connection,
     creator_id: int,
     name: str,
     *,
-    platform: str | None = None,
-    platform_id: str | None = None,
-    url: str | None = None,
-    from_name: str | None = None,
-    reason: str | None = None,
+    profile_id: int | None = None,
+    reason: str,
     status: str = "active",
     note: str | None = None,
-    metadata: Any = None,
+    from_name: str | None = None,
 ) -> int:
-    platform = normalize_platform(platform)
-    platform_id = normalize_pid(platform_id)
-    canon = canonical_url(url)
     ts = now_iso()
     existing = conn.execute(
         """
-        SELECT id FROM creator_names
+        SELECT id
+        FROM creator_aliases
         WHERE creator_id = ?
+          AND coalesce(profile_id, 0) = coalesce(?, 0)
           AND lower(name) = lower(?)
-          AND coalesce(platform, '') = coalesce(?, '')
-          AND coalesce(platform_id, '') = coalesce(?, '')
-          AND coalesce(canonical_url, '') = coalesce(?, '')
-        ORDER BY id DESC LIMIT 1
+        ORDER BY id DESC
+        LIMIT 1
         """,
-        (creator_id, name, platform, platform_id, canon),
+        (creator_id, profile_id, name),
     ).fetchone()
     if existing:
         conn.execute(
             """
-            UPDATE creator_names
-            SET from_name = coalesce(?, from_name),
-                reason = coalesce(?, reason),
+            UPDATE creator_aliases
+            SET reason = coalesce(?, reason),
                 status = coalesce(?, status),
                 note = coalesce(?, note),
-                metadata_json = coalesce(?, metadata_json),
+                from_name = coalesce(?, from_name),
                 last_seen_at = ?,
                 updated_at = ?
             WHERE id = ?
             """,
-            (from_name, reason, status, note, json_dumps(metadata), ts, ts, existing["id"]),
+            (reason, status, note, from_name, ts, ts, existing["id"]),
         )
+        touch_creator(conn, creator_id, ts=ts)
         return int(existing["id"])
     cur = conn.execute(
         """
-        INSERT INTO creator_names(
-            creator_id, name, platform, platform_id, url, canonical_url,
-            from_name, reason, status, note, metadata_json,
+        INSERT INTO creator_aliases(
+            creator_id, profile_id, name, reason, status, note, from_name,
             first_seen_at, last_seen_at, created_at, updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (creator_id, name, platform, platform_id, url, canon, from_name, reason, status, note,
-         json_dumps(metadata), ts, ts, ts, ts),
+        (creator_id, profile_id, name, reason, status, note, from_name, ts, ts, ts, ts),
     )
-    conn.execute("UPDATE creators SET updated_at = ? WHERE id = ?", (ts, creator_id))
+    touch_creator(conn, creator_id, ts=ts)
     return require_lastrowid(cur)
 
 
-def upsert_platform_account(
+def insert_profile(
     conn: sqlite3.Connection,
     creator_id: int,
-    platform: str | None,
-    platform_id: str | None,
-    *,
-    display_name: str | None = None,
-    profile_url: str | None = None,
-    source: str | None = None,
-    metadata: Any = None,
-) -> int | None:
-    platform = normalize_platform(platform)
-    platform_id = normalize_pid(platform_id)
-    if not platform or not platform_id:
-        return None
-    ts = now_iso()
-    profile_canon = canonical_url(profile_url)
-    row = conn.execute(
-        "SELECT id, creator_id FROM platform_accounts WHERE platform = ? AND platform_id = ?",
-        (platform, platform_id),
-    ).fetchone()
-    if row and int(row["creator_id"]) != creator_id:
-        raise ConflictError(
-            f"{platform}:{platform_id} is already linked to {creator_label(conn, int(row['creator_id']))}"
-        )
-    if row:
-        conn.execute(
-            """
-            UPDATE platform_accounts
-            SET display_name = coalesce(?, display_name),
-                profile_url = coalesce(?, profile_url),
-                profile_canonical_url = coalesce(?, profile_canonical_url),
-                source = coalesce(?, source),
-                metadata_json = coalesce(?, metadata_json),
-                last_seen_at = ?,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (display_name, profile_url, profile_canon, source, json_dumps(metadata), ts, ts, row["id"]),
-        )
-        return int(row["id"])
-    cur = conn.execute(
-        """
-        INSERT INTO platform_accounts(
-            creator_id, platform, platform_id, display_name, profile_url,
-            profile_canonical_url, source, metadata_json,
-            first_seen_at, last_seen_at, created_at, updated_at
-        )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (creator_id, platform, platform_id, display_name, profile_url, profile_canon,
-         source, json_dumps(metadata), ts, ts, ts, ts),
-    )
-    conn.execute("UPDATE creators SET updated_at = ? WHERE id = ?", (ts, creator_id))
-    return require_lastrowid(cur)
-
-
-def insert_metadata_task(
-    conn: sqlite3.Connection,
-    creator_id: int,
-    target_kind: str,
-    target_row_id: int,
-    url: str,
-) -> None:
-    canon = canonical_url(url)
-    if not canon:
-        return
-    row = conn.execute(
-        """
-        SELECT id FROM metadata_tasks
-        WHERE canonical_url = ? AND target_kind = ? AND target_row_id = ?
-          AND status IN ('pending', 'done')
-        LIMIT 1
-        """,
-        (canon, target_kind, target_row_id),
-    ).fetchone()
-    if row:
-        return
-    ts = now_iso()
-    conn.execute(
-        """
-        INSERT INTO metadata_tasks(
-            creator_id, target_kind, target_row_id, url, canonical_url,
-            status, created_at, updated_at
-        )
-        VALUES(?, ?, ?, ?, ?, 'pending', ?, ?)
-        """,
-        (creator_id, target_kind, target_row_id, url, canon, ts, ts),
-    )
-
-
-def insert_url_fact(
-    conn: sqlite3.Connection,
-    creator_id: int,
-    url: str,
     *,
     platform: str | None = None,
     platform_id: str | None = None,
-    name: str | None = None,
+    display_name: str | None = None,
+    source: str | None = None,
+    identity_state: str = "unresolved",
+    status: str = "active",
+    note: str | None = None,
+    metadata: Any = None,
+) -> int:
+    ts = now_iso()
+    cur = conn.execute(
+        """
+        INSERT INTO creator_profiles(
+            creator_id, platform, platform_id, display_name, source,
+            identity_state, status, note, last_metadata_json,
+            first_seen_at, last_seen_at, created_at, updated_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            creator_id,
+            normalize_platform(platform),
+            normalize_pid(platform_id),
+            display_name,
+            source,
+            identity_state,
+            status,
+            note,
+            json_dumps(metadata),
+            ts,
+            ts,
+            ts,
+            ts,
+        ),
+    )
+    touch_creator(conn, creator_id, ts=ts)
+    return require_lastrowid(cur)
+
+
+def update_profile(
+    conn: sqlite3.Connection,
+    profile_id: int,
+    *,
+    platform: str | None = None,
+    platform_id: str | None = None,
+    display_name: str | None = None,
+    source: str | None = None,
+    identity_state: str | None = None,
+    status: str | None = None,
+    note: str | None = None,
+    metadata: Any = None,
+) -> None:
+    row = profile_row(conn, profile_id)
+    if row is None:
+        raise UserError(f"Profile not found: {profile_id}")
+    platform = normalize_platform(platform)
+    platform_id = normalize_pid(platform_id)
+    if platform and platform_id:
+        conflict = profile_row_by_identity(conn, platform, platform_id)
+        if conflict is not None and int(conflict["id"]) != profile_id:
+            raise ConflictError(
+                f"{platform}:{platform_id} is already linked to {creator_label(conn, int(conflict['creator_id']))}"
+            )
+    ts = now_iso()
+    conn.execute(
+        """
+        UPDATE creator_profiles
+        SET platform = coalesce(?, platform),
+            platform_id = coalesce(?, platform_id),
+            display_name = coalesce(?, display_name),
+            source = coalesce(?, source),
+            identity_state = coalesce(?, identity_state),
+            status = coalesce(?, status),
+            note = coalesce(?, note),
+            last_metadata_json = coalesce(?, last_metadata_json),
+            last_seen_at = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            platform,
+            platform_id,
+            display_name,
+            source,
+            identity_state,
+            status,
+            note,
+            json_dumps(metadata),
+            ts,
+            ts,
+            profile_id,
+        ),
+    )
+    touch_creator(conn, int(row["creator_id"]), ts=ts)
+
+
+def insert_profile_url(
+    conn: sqlite3.Connection,
+    profile_id: int,
+    url: str,
+    *,
     from_url: str | None = None,
     reason: str | None = None,
     status: str = "active",
     note: str | None = None,
-    metadata: Any = None,
-    schedule_metadata: bool = True,
 ) -> int:
     canon = canonical_url(url)
     if not canon:
         raise UserError(f"Invalid URL: {url}")
-    platform = normalize_platform(platform) or infer_platform_from_url(canon)
-    platform_id = normalize_pid(platform_id)
     ts = now_iso()
-    existing = conn.execute(
-        "SELECT id, creator_id FROM creator_urls WHERE canonical_url = ?", (canon,)
-    ).fetchone()
-    if existing and int(existing["creator_id"]) != creator_id:
-        raise ConflictError(
-            f"URL is already linked to {creator_label(conn, int(existing['creator_id']))}: {url}"
+    cur = conn.execute(
+        """
+        INSERT INTO profile_urls(
+            profile_id, url, canonical_url, from_url, reason,
+            status, note, first_seen_at, last_seen_at, created_at, updated_at
         )
-    if existing:
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (profile_id, url, canon, from_url, reason, status, note, ts, ts, ts, ts),
+    )
+    profile = profile_row(conn, profile_id)
+    if profile is not None:
+        touch_creator(conn, int(profile["creator_id"]), ts=ts)
+    return require_lastrowid(cur)
+
+
+def update_profile_url(
+    conn: sqlite3.Connection,
+    url_id: int,
+    *,
+    profile_id: int | None = None,
+    from_url: str | None = None,
+    reason: str | None = None,
+    status: str | None = None,
+    note: str | None = None,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT u.*, p.creator_id
+        FROM profile_urls u
+        JOIN creator_profiles p ON p.id = u.profile_id
+        WHERE u.id = ?
+        """,
+        (url_id,),
+    ).fetchone()
+    if row is None:
+        raise UserError(f"Profile URL not found: {url_id}")
+    ts = now_iso()
+    conn.execute(
+        """
+        UPDATE profile_urls
+        SET profile_id = coalesce(?, profile_id),
+            from_url = coalesce(?, from_url),
+            reason = coalesce(?, reason),
+            status = coalesce(?, status),
+            note = coalesce(?, note),
+            last_seen_at = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (profile_id, from_url, reason, status, note, ts, ts, url_id),
+    )
+    touch_creator(conn, int(row["creator_id"]), ts=ts)
+    if profile_id is not None and profile_id != int(row["profile_id"]):
+        profile = profile_row(conn, profile_id)
+        if profile is not None:
+            touch_creator(conn, int(profile["creator_id"]), ts=ts)
+
+
+def delete_profile_if_orphaned(conn: sqlite3.Connection, profile_id: int) -> None:
+    row = profile_row(conn, profile_id)
+    if row is None:
+        return
+    counts = conn.execute(
+        """
+        SELECT
+            (SELECT count(*) FROM profile_urls WHERE profile_id = ?) AS url_count,
+            (SELECT count(*) FROM creator_aliases WHERE profile_id = ?) AS alias_count,
+            (SELECT count(*) FROM posts WHERE profile_id = ?) AS post_count
+        """,
+        (profile_id, profile_id, profile_id),
+    ).fetchone()
+    if counts is None:
+        return
+    if int(counts["url_count"]) == 0 and int(counts["alias_count"]) == 0 and int(counts["post_count"]) == 0:
+        conn.execute("DELETE FROM creator_profiles WHERE id = ?", (profile_id,))
+        touch_creator(conn, int(row["creator_id"]))
+
+
+def upsert_profile_job(conn: sqlite3.Connection, profile_url_id: int) -> None:
+    row = conn.execute(
+        "SELECT id, status FROM profile_enrichment_jobs WHERE profile_url_id = ?",
+        (profile_url_id,),
+    ).fetchone()
+    ts = now_iso()
+    if row:
+        if row["status"] == "done":
+            return
         conn.execute(
             """
-            UPDATE creator_urls
-            SET platform = coalesce(?, platform),
-                platform_id = coalesce(?, platform_id),
-                name = coalesce(?, name),
-                from_url = coalesce(?, from_url),
-                reason = coalesce(?, reason),
-                status = coalesce(?, status),
-                note = coalesce(?, note),
-                metadata_json = coalesce(?, metadata_json),
-                last_seen_at = ?,
+            UPDATE profile_enrichment_jobs
+            SET status = 'pending',
+                last_error = NULL,
                 updated_at = ?
             WHERE id = ?
             """,
-            (platform, platform_id, name, from_url, reason, status, note, json_dumps(metadata),
-             ts, ts, existing["id"]),
+            (ts, row["id"]),
         )
-        url_id = int(existing["id"])
-    else:
-        cur = conn.execute(
-            """
-            INSERT INTO creator_urls(
-                creator_id, url, canonical_url, platform, platform_id, name,
-                from_url, reason, status, note, metadata_json,
-                first_seen_at, last_seen_at, created_at, updated_at
-            )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (creator_id, url, canon, platform, platform_id, name, from_url, reason, status, note,
-             json_dumps(metadata), ts, ts, ts, ts),
+        return
+    conn.execute(
+        """
+        INSERT INTO profile_enrichment_jobs(
+            profile_url_id, status, attempts, last_error, created_at, updated_at
         )
-        url_id = require_lastrowid(cur)
-
-    if platform and platform_id:
-        upsert_platform_account(
-            conn, creator_id, platform, platform_id,
-            display_name=name, profile_url=url, source="manual-url", metadata=metadata,
-        )
-    if name:
-        insert_name_fact(
-            conn, creator_id, name, platform=platform, platform_id=platform_id,
-            url=url, reason=reason, status=status, note=note, metadata=metadata,
-        )
-    if schedule_metadata:
-        insert_metadata_task(conn, creator_id, "url", url_id, url)
-
-    conn.execute("UPDATE creators SET updated_at = ? WHERE id = ?", (ts, creator_id))
-    return url_id
+        VALUES(?, 'pending', 0, NULL, ?, ?)
+        """,
+        (profile_url_id, ts, ts),
+    )
 
 
 def insert_or_update_post(
     conn: sqlite3.Connection,
     creator_id: int,
+    profile_id: int,
     url: str,
     metadata_info: dict[str, Any] | None,
     *,
@@ -617,36 +838,25 @@ def insert_or_update_post(
     canon = canonical_url(url)
     if not canon:
         raise UserError(f"Invalid URL: {url}")
-    resolved_metadata_info: dict[str, Any] = metadata_info or {}
     ts = now_iso()
+    info = metadata_info or {}
     existing = conn.execute(
-        "SELECT id, creator_id FROM posts WHERE canonical_url = ?", (canon,)
+        "SELECT id, creator_id, profile_id FROM posts WHERE canonical_url = ?",
+        (canon,),
     ).fetchone()
     if existing and int(existing["creator_id"]) != creator_id:
         raise ConflictError(
             f"Post URL is already linked to {creator_label(conn, int(existing['creator_id']))}: {url}"
         )
-    values = (
-        resolved_metadata_info.get("platform"),
-        resolved_metadata_info.get("post_id"),
-        resolved_metadata_info.get("platform_id"),
-        resolved_metadata_info.get("author_name"),
-        resolved_metadata_info.get("title"),
-        resolved_metadata_info.get("text"),
-        resolved_metadata_info.get("posted_at"),
-        json_dumps(resolved_metadata_info.get("raw")),
-        note,
-        ts,
-        ts,
-    )
+    if existing and int(existing["profile_id"]) != profile_id:
+        raise ConflictError(
+            f"Post URL is already linked to a different profile for {creator_label(conn, creator_id)}: {url}"
+        )
     if existing:
         conn.execute(
             """
             UPDATE posts
-            SET platform = coalesce(?, platform),
-                platform_post_id = coalesce(?, platform_post_id),
-                author_platform_id = coalesce(?, author_platform_id),
-                author_name = coalesce(?, author_name),
+            SET platform_post_id = coalesce(?, platform_post_id),
                 title = coalesce(?, title),
                 text = coalesce(?, text),
                 posted_at = coalesce(?, posted_at),
@@ -656,34 +866,54 @@ def insert_or_update_post(
                 updated_at = ?
             WHERE id = ?
             """,
-            values + (existing["id"],),
+            (
+                info.get("post_id"),
+                info.get("title"),
+                info.get("text"),
+                info.get("posted_at"),
+                json_dumps(info.get("raw")),
+                note,
+                ts,
+                ts,
+                existing["id"],
+            ),
         )
+        touch_creator(conn, creator_id, ts=ts)
         return int(existing["id"])
     cur = conn.execute(
         """
         INSERT INTO posts(
-            creator_id, url, canonical_url, platform, platform_post_id,
-            author_platform_id, author_name, title, text, posted_at,
-            captured_at, metadata_json, note, created_at, updated_at
+            creator_id, profile_id, url, canonical_url, platform_post_id,
+            title, text, posted_at, captured_at, metadata_json, note,
+            created_at, updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (creator_id, url, canon, resolved_metadata_info.get("platform"), resolved_metadata_info.get("post_id"),
-         resolved_metadata_info.get("platform_id"), resolved_metadata_info.get("author_name"),
-         resolved_metadata_info.get("title"), resolved_metadata_info.get("text"), resolved_metadata_info.get("posted_at"),
-         ts, json_dumps(resolved_metadata_info.get("raw")), note, ts, ts),
+        (
+            creator_id,
+            profile_id,
+            url,
+            canon,
+            info.get("post_id"),
+            info.get("title"),
+            info.get("text"),
+            info.get("posted_at"),
+            ts,
+            json_dumps(info.get("raw")),
+            note,
+            ts,
+            ts,
+        ),
     )
-    conn.execute("UPDATE creators SET updated_at = ? WHERE id = ?", (ts, creator_id))
+    touch_creator(conn, creator_id, ts=ts)
     return require_lastrowid(cur)
 
-
-# ── search ────────────────────────────────────────────────────────────────────
 
 def scalar_texts(value: Any, limit: int = 8000) -> str:
     texts: list[str] = []
 
     def walk(item: Any) -> None:
-        if sum(len(x) for x in texts) > limit:
+        if sum(len(text) for text in texts) > limit:
             return
         if item is None:
             return
@@ -704,64 +934,196 @@ def scalar_texts(value: Any, limit: int = 8000) -> str:
     return " ".join(texts)[:limit]
 
 
-def rebuild_search(conn: sqlite3.Connection) -> None:
-    conn.execute("DELETE FROM search_fts")
+def _search_add(
+    conn: sqlite3.Connection,
+    kind: str,
+    row_id: int,
+    creator_id: int,
+    title: str,
+    body: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO search_fts(kind, row_id, creator_id, title, body) VALUES(?, ?, ?, ?, ?)",
+        (kind, row_id, creator_id, title, body),
+    )
 
-    def add(kind: str, row_id: int, creator_id: int, title: str, body: str) -> None:
-        conn.execute(
-            "INSERT INTO search_fts(kind, row_id, creator_id, title, body) VALUES(?, ?, ?, ?, ?)",
-            (kind, row_id, creator_id, title, body),
+
+def sync_creator_search(conn: sqlite3.Connection, creator_id: int) -> None:
+    conn.execute("DELETE FROM search_fts WHERE creator_id = ?", (creator_id,))
+    creator = conn.execute(
+        "SELECT * FROM creators WHERE id = ?",
+        (creator_id,),
+    ).fetchone()
+    if creator is None:
+        return
+    _search_add(
+        conn,
+        "creator",
+        int(creator["id"]),
+        creator_id,
+        creator["primary_name"],
+        " ".join([creator["primary_name"], creator["note"] or "", creator["status"] or ""]),
+    )
+
+    for row in conn.execute(
+        """
+        SELECT a.*, p.platform, p.platform_id, p.display_name
+        FROM creator_aliases a
+        LEFT JOIN creator_profiles p ON p.id = a.profile_id
+        WHERE a.creator_id = ?
+        ORDER BY a.id
+        """,
+        (creator_id,),
+    ):
+        _search_add(
+            conn,
+            "alias",
+            int(row["id"]),
+            creator_id,
+            row["name"],
+            " ".join(
+                str(item or "")
+                for item in [
+                    row["name"],
+                    row["platform"],
+                    row["platform_id"],
+                    row["display_name"],
+                    row["from_name"],
+                    row["reason"],
+                    row["status"],
+                    row["note"],
+                ]
+            ),
         )
 
-    for row in conn.execute("SELECT * FROM creators ORDER BY id"):
-        add("creator", row["id"], row["id"], row["primary_name"],
-            " ".join([row["primary_name"], row["note"] or "", row["status"] or ""]))
+    for row in conn.execute(
+        "SELECT * FROM creator_profiles WHERE creator_id = ? ORDER BY id",
+        (creator_id,),
+    ):
+        _search_add(
+            conn,
+            "profile",
+            int(row["id"]),
+            creator_id,
+            profile_identity_text(row["platform"], row["platform_id"]),
+            " ".join(
+                str(item or "")
+                for item in [
+                    row["platform"],
+                    row["platform_id"],
+                    row["display_name"],
+                    row["source"],
+                    row["identity_state"],
+                    row["status"],
+                    row["note"],
+                    scalar_texts(json_loads(row["last_metadata_json"], {}), 2000),
+                ]
+            ),
+        )
 
-    for row in conn.execute("SELECT * FROM creator_names ORDER BY id"):
-        add("name", row["id"], row["creator_id"], row["name"],
-            " ".join(str(x or "") for x in [row["name"], row["platform"], row["platform_id"],
-            row["url"], row["from_name"], row["reason"], row["status"], row["note"],
-            scalar_texts(json_loads(row["metadata_json"], {}), 2000)]))
+    for row in conn.execute(
+        """
+        SELECT u.*
+        FROM profile_urls u
+        JOIN creator_profiles p ON p.id = u.profile_id
+        WHERE p.creator_id = ?
+        ORDER BY u.id
+        """,
+        (creator_id,),
+    ):
+        _search_add(
+            conn,
+            "profile_url",
+            int(row["id"]),
+            creator_id,
+            row["url"],
+            " ".join(
+                str(item or "")
+                for item in [
+                    row["url"],
+                    row["from_url"],
+                    row["reason"],
+                    row["status"],
+                    row["note"],
+                ]
+            ),
+        )
 
-    for row in conn.execute("SELECT * FROM creator_urls ORDER BY id"):
-        add("url", row["id"], row["creator_id"], row["url"],
-            " ".join(str(x or "") for x in [row["url"], row["platform"], row["platform_id"],
-            row["name"], row["from_url"], row["reason"], row["status"], row["note"],
-            scalar_texts(json_loads(row["metadata_json"], {}), 2000)]))
+    for row in conn.execute(
+        "SELECT * FROM posts WHERE creator_id = ? ORDER BY id",
+        (creator_id,),
+    ):
+        _search_add(
+            conn,
+            "post",
+            int(row["id"]),
+            creator_id,
+            row["title"] or row["url"],
+            " ".join(
+                str(item or "")
+                for item in [
+                    row["url"],
+                    row["platform_post_id"],
+                    row["title"],
+                    row["text"],
+                    row["posted_at"],
+                    row["note"],
+                    scalar_texts(json_loads(row["metadata_json"], {}), 4000),
+                ]
+            ),
+        )
 
-    for row in conn.execute("SELECT * FROM platform_accounts ORDER BY id"):
-        add("account", row["id"], row["creator_id"],
-            f"{row['platform']}:{row['platform_id']}",
-            " ".join(str(x or "") for x in [row["platform"], row["platform_id"],
-            row["display_name"], row["profile_url"], row["source"],
-            scalar_texts(json_loads(row["metadata_json"], {}), 2000)]))
+    reminder = conn.execute(
+        "SELECT * FROM reminders WHERE creator_id = ?",
+        (creator_id,),
+    ).fetchone()
+    if reminder is not None:
+        _search_add(
+            conn,
+            "reminder",
+            int(reminder["id"]),
+            creator_id,
+            reminder["next_due_at"],
+            " ".join(
+                str(item or "")
+                for item in [
+                    reminder["next_due_at"],
+                    reminder["interval_days"],
+                    reminder["note"],
+                ]
+            ),
+        )
 
-    for row in conn.execute("SELECT * FROM posts ORDER BY id"):
-        add("post", row["id"], row["creator_id"], row["title"] or row["url"],
-            " ".join(str(x or "") for x in [row["url"], row["platform"], row["platform_post_id"],
-            row["author_platform_id"], row["author_name"], row["title"], row["text"],
-            row["posted_at"], row["note"],
-            scalar_texts(json_loads(row["metadata_json"], {}), 4000)]))
+    for row in conn.execute(
+        "SELECT * FROM worklogs WHERE creator_id = ? ORDER BY id",
+        (creator_id,),
+    ):
+        _search_add(
+            conn,
+            "work",
+            int(row["id"]),
+            creator_id,
+            row["content"],
+            str(row["content"] or ""),
+        )
 
-    for row in conn.execute("SELECT * FROM reminders ORDER BY id"):
-        add("reminder", row["id"], row["creator_id"], row["next_due_at"],
-            " ".join(str(x or "") for x in [row["next_due_at"], row["interval_days"], row["note"]]))
 
-    for row in conn.execute("SELECT * FROM worklogs ORDER BY id"):
-        add("work", row["id"], row["creator_id"], row["message"],
-            " ".join(str(x or "") for x in [row["message"],
-            scalar_texts(json_loads(row["tags_json"], []), 1000),
-            scalar_texts(json_loads(row["paths_json"], []), 1000),
-            scalar_texts(json_loads(row["urls_json"], []), 1000),
-            scalar_texts(json_loads(row["metadata_json"], {}), 2000)]))
+def rebuild_search(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM search_fts")
+    creator_ids = [
+        int(row["id"])
+        for row in conn.execute("SELECT id FROM creators ORDER BY id")
+    ]
+    for creator_id in creator_ids:
+        sync_creator_search(conn, creator_id)
 
 
 def fts_query(raw: str) -> str | None:
     terms = re.findall(r"[\w@.#:/-]+", raw, flags=re.UNICODE)
-    terms = [t.strip('"') for t in terms if t.strip('"')]
+    terms = [term.strip('"') for term in terms if term.strip('"')]
     if not terms:
         return None
-    escaped = [t.replace('"', '""') for t in terms[:8]]
+    escaped = [term.replace('"', '""') for term in terms[:8]]
     return " ".join(f'"{term}"' for term in escaped)
 
 
@@ -774,36 +1136,49 @@ def search_rows(conn: sqlite3.Connection, query: str, limit: int = 30) -> list[s
             for row in conn.execute(
                 """
                 SELECT kind, row_id, creator_id, title, body, bm25(search_fts) AS rank
-                FROM search_fts WHERE search_fts MATCH ?
-                ORDER BY rank LIMIT ?
+                FROM search_fts
+                WHERE search_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
                 """,
                 (match, limit),
             ):
                 key = (row["kind"], int(row["row_id"]))
-                seen.add(key)
                 rows.append(row)
+                seen.add(key)
         except sqlite3.OperationalError:
             pass
     like = f"%{query}%"
     for row in conn.execute(
-        "SELECT kind, row_id, creator_id, title, body, 1000.0 AS rank FROM search_fts WHERE title LIKE ? OR body LIKE ? LIMIT ?",
+        """
+        SELECT kind, row_id, creator_id, title, body, 1000.0 AS rank
+        FROM search_fts
+        WHERE title LIKE ? OR body LIKE ?
+        LIMIT ?
+        """,
         (like, like, limit),
     ):
         key = (row["kind"], int(row["row_id"]))
-        if key not in seen:
-            rows.append(row)
-            seen.add(key)
+        if key in seen:
+            continue
+        rows.append(row)
+        seen.add(key)
         if len(rows) >= limit:
             break
     return rows
 
 
 def summarize_creator_matches(
-    conn: sqlite3.Connection, creator_id: int, rows: list[sqlite3.Row]
+    conn: sqlite3.Connection,
+    creator_id: int,
+    rows: list[sqlite3.Row],
 ) -> dict[str, Any]:
     creator = conn.execute(
-        "SELECT id, primary_name, status FROM creators WHERE id = ?", (creator_id,)
+        "SELECT id, primary_name, status FROM creators WHERE id = ?",
+        (creator_id,),
     ).fetchone()
+    if creator is None:
+        raise UserError(f"Creator not found: #{creator_id}")
     kind_counts: dict[str, int] = {}
     snippets: list[str] = []
     seen_snippets: set[str] = set()
@@ -811,22 +1186,56 @@ def summarize_creator_matches(
         kind = str(row["kind"])
         kind_counts[kind] = kind_counts.get(kind, 0) + 1
         title = shorten(row["title"], 70)
-        if title and title not in seen_snippets and title != creator["primary_name"]:
+        if title and title != creator["primary_name"] and title not in seen_snippets:
             seen_snippets.add(title)
             snippets.append(f"{kind}:{title}")
         if len(snippets) >= 4:
             break
-    names = [r["name"] for r in conn.execute(
-        "SELECT DISTINCT name FROM creator_names WHERE creator_id = ? ORDER BY id DESC LIMIT 5",
-        (creator_id,))]
-    accounts = [f"{r['platform']}:{r['platform_id']}" for r in conn.execute(
-        "SELECT platform, platform_id FROM platform_accounts WHERE creator_id = ? ORDER BY updated_at DESC LIMIT 4",
-        (creator_id,))]
-    urls = [(r["platform"], r["url"]) for r in conn.execute(
-        "SELECT platform, url FROM creator_urls WHERE creator_id = ? ORDER BY updated_at DESC LIMIT 3",
-        (creator_id,))]
-    return {"creator": creator, "kind_counts": kind_counts, "snippets": snippets,
-            "names": names, "accounts": accounts, "urls": urls}
+
+    aliases = [
+        row["name"]
+        for row in conn.execute(
+            """
+            SELECT DISTINCT name
+            FROM creator_aliases
+            WHERE creator_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 5
+            """,
+            (creator_id,),
+        )
+    ]
+    profiles = [
+        profile_brief(
+            row["platform"],
+            row["platform_id"],
+            row["display_name"],
+            row["primary_url"],
+        )
+        for row in profile_rows_by_creator(conn, creator_id)[:4]
+    ]
+    urls = [
+        row["url"]
+        for row in conn.execute(
+            """
+            SELECT u.url
+            FROM profile_urls u
+            JOIN creator_profiles p ON p.id = u.profile_id
+            WHERE p.creator_id = ?
+            ORDER BY u.updated_at DESC, u.id DESC
+            LIMIT 3
+            """,
+            (creator_id,),
+        )
+    ]
+    return {
+        "creator": creator,
+        "kind_counts": kind_counts,
+        "snippets": snippets,
+        "aliases": aliases,
+        "profiles": profiles,
+        "urls": urls,
+    }
 
 
 def grouped_search(conn: sqlite3.Connection, query: str, limit: int = 12) -> list[dict[str, Any]]:
@@ -837,61 +1246,107 @@ def grouped_search(conn: sqlite3.Connection, query: str, limit: int = 12) -> lis
         creator_id = int(row["creator_id"])
         grouped.setdefault(creator_id, []).append(row)
         first_rank.setdefault(creator_id, float(row["rank"]) + index * 0.0001)
-    creator_ids = sorted(grouped, key=lambda cid: first_rank[cid])[:limit]
-    return [summarize_creator_matches(conn, cid, grouped[cid]) for cid in creator_ids]
+    creator_ids = sorted(grouped, key=lambda creator_id: first_rank[creator_id])[:limit]
+    return [summarize_creator_matches(conn, creator_id, grouped[creator_id]) for creator_id in creator_ids]
 
-
-# ── fetch ─────────────────────────────────────────────────────────────────────
 
 def fetch_creator_snapshot(conn: sqlite3.Connection, creator_id: int) -> dict[str, Any]:
     creator = conn.execute("SELECT * FROM creators WHERE id = ?", (creator_id,)).fetchone()
-    if not creator:
+    if creator is None:
         raise UserError(f"Creator not found: #{creator_id}")
+
+    aliases = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT a.*,
+                   p.platform,
+                   p.platform_id,
+                   p.display_name
+            FROM creator_aliases a
+            LEFT JOIN creator_profiles p ON p.id = a.profile_id
+            WHERE a.creator_id = ?
+            ORDER BY a.updated_at DESC, a.id DESC
+            """,
+            (creator_id,),
+        )
+    ]
+
+    profiles: list[dict[str, Any]] = []
+    for row in profile_rows_by_creator(conn, creator_id):
+        profile_data = dict(row)
+        profile_data["urls"] = [dict(url_row) for url_row in profile_url_rows_for_profile(conn, int(row["id"]))]
+        profiles.append(profile_data)
+
+    reminder = conn.execute(
+        "SELECT id, next_due_at, interval_days, note FROM reminders WHERE creator_id = ?",
+        (creator_id,),
+    ).fetchone()
+    posts = conn.execute(
+        """
+        SELECT p.*,
+               cp.platform,
+               cp.platform_id,
+               cp.display_name
+        FROM posts p
+        JOIN creator_profiles cp ON cp.id = p.profile_id
+        WHERE p.creator_id = ?
+        ORDER BY p.id DESC
+        LIMIT 10
+        """,
+        (creator_id,),
+    ).fetchall()
+    work = conn.execute(
+        """
+        SELECT id, content, created_at, updated_at
+        FROM worklogs
+        WHERE creator_id = ?
+        ORDER BY id DESC
+        LIMIT 10
+        """,
+        (creator_id,),
+    ).fetchall()
     return {
         "creator": creator,
-        "names": conn.execute(
-            "SELECT id, name, platform, platform_id, reason, status, from_name, note FROM creator_names WHERE creator_id = ? ORDER BY id DESC",
-            (creator_id,),
-        ).fetchall(),
-        "urls": conn.execute(
-            "SELECT id, url, platform, platform_id, name, reason, status, from_url, note FROM creator_urls WHERE creator_id = ? ORDER BY id DESC",
-            (creator_id,),
-        ).fetchall(),
-        "accounts": conn.execute(
-            "SELECT id, platform, platform_id, display_name, profile_url, source, last_seen_at FROM platform_accounts WHERE creator_id = ? ORDER BY updated_at DESC",
-            (creator_id,),
-        ).fetchall(),
-        "reminder": conn.execute(
-            "SELECT id, next_due_at, interval_days, note FROM reminders WHERE creator_id = ?",
-            (creator_id,),
-        ).fetchone(),
-        "posts": conn.execute(
-            "SELECT id, url, platform, platform_post_id, author_platform_id, author_name, title, posted_at FROM posts WHERE creator_id = ? ORDER BY id DESC LIMIT 10",
-            (creator_id,),
-        ).fetchall(),
-        "work": conn.execute(
-            "SELECT id, message, tags_json, paths_json, urls_json, created_at FROM worklogs WHERE creator_id = ? ORDER BY id DESC LIMIT 10",
-            (creator_id,),
-        ).fetchall(),
+        "aliases": aliases,
+        "profiles": profiles,
+        "reminder": reminder,
+        "posts": posts,
+        "work": work,
     }
 
 
 def fetch_post_detail_row(conn: sqlite3.Connection, post_id: int) -> sqlite3.Row:
     row = conn.execute(
-        "SELECT p.*, c.primary_name FROM posts p JOIN creators c ON c.id = p.creator_id WHERE p.id = ?",
+        """
+        SELECT p.*,
+               c.primary_name,
+               cp.platform,
+               cp.platform_id,
+               cp.display_name
+        FROM posts p
+        JOIN creators c ON c.id = p.creator_id
+        JOIN creator_profiles cp ON cp.id = p.profile_id
+        WHERE p.id = ?
+        """,
         (post_id,),
     ).fetchone()
-    if not row:
+    if row is None:
         raise UserError(f"Post not found: {post_id}")
     return row
 
 
 def fetch_work_detail_row(conn: sqlite3.Connection, work_id: int) -> sqlite3.Row:
     row = conn.execute(
-        "SELECT w.*, c.primary_name FROM worklogs w JOIN creators c ON c.id = w.creator_id WHERE w.id = ?",
+        """
+        SELECT w.*, c.primary_name
+        FROM worklogs w
+        JOIN creators c ON c.id = w.creator_id
+        WHERE w.id = ?
+        """,
         (work_id,),
     ).fetchone()
-    if not row:
+    if row is None:
         raise UserError(f"Worklog not found: {work_id}")
     return row
 
@@ -899,10 +1354,21 @@ def fetch_work_detail_row(conn: sqlite3.Connection, work_id: int) -> sqlite3.Row
 def due_rows(conn: sqlite3.Connection, include_future: bool = False) -> list[sqlite3.Row]:
     if include_future:
         return conn.execute(
-            "SELECT r.*, c.primary_name FROM reminders r JOIN creators c ON c.id = r.creator_id ORDER BY r.next_due_at ASC"
+            """
+            SELECT r.*, c.primary_name
+            FROM reminders r
+            JOIN creators c ON c.id = r.creator_id
+            ORDER BY r.next_due_at ASC
+            """
         ).fetchall()
     return conn.execute(
-        "SELECT r.*, c.primary_name FROM reminders r JOIN creators c ON c.id = r.creator_id WHERE r.next_due_at <= ? ORDER BY r.next_due_at ASC",
+        """
+        SELECT r.*, c.primary_name
+        FROM reminders r
+        JOIN creators c ON c.id = r.creator_id
+        WHERE r.next_due_at <= ?
+        ORDER BY r.next_due_at ASC
+        """,
         (today().isoformat(),),
     ).fetchall()
 
@@ -910,10 +1376,20 @@ def due_rows(conn: sqlite3.Connection, include_future: bool = False) -> list[sql
 def recent_creators(conn: sqlite3.Connection, limit: int, offset: int = 0) -> list[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT c.id, c.primary_name, c.status, c.created_at, c.updated_at,
+        SELECT c.id,
+               c.primary_name,
+               c.status,
+               c.created_at,
+               c.updated_at,
+               (SELECT count(*) FROM creator_profiles p WHERE p.creator_id = c.id) AS profile_count,
+               (
+                   SELECT count(*)
+                   FROM profile_urls u
+                   JOIN creator_profiles p ON p.id = u.profile_id
+                   WHERE p.creator_id = c.id
+               ) AS url_count,
                (SELECT count(*) FROM posts p WHERE p.creator_id = c.id) AS post_count,
-               (SELECT count(*) FROM worklogs w WHERE w.creator_id = c.id) AS work_count,
-               (SELECT count(*) FROM creator_urls u WHERE u.creator_id = c.id) AS url_count
+               (SELECT count(*) FROM worklogs w WHERE w.creator_id = c.id) AS work_count
         FROM creators c
         ORDER BY c.updated_at DESC, c.id DESC
         LIMIT ? OFFSET ?
@@ -925,8 +1401,14 @@ def recent_creators(conn: sqlite3.Connection, limit: int, offset: int = 0) -> li
 def recent_posts(conn: sqlite3.Connection, limit: int, offset: int = 0) -> list[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT p.*, c.primary_name FROM posts p
+        SELECT p.*,
+               c.primary_name,
+               cp.platform,
+               cp.platform_id,
+               cp.display_name
+        FROM posts p
         JOIN creators c ON c.id = p.creator_id
+        JOIN creator_profiles cp ON cp.id = p.profile_id
         ORDER BY p.captured_at DESC, p.id DESC
         LIMIT ? OFFSET ?
         """,
@@ -937,7 +1419,8 @@ def recent_posts(conn: sqlite3.Connection, limit: int, offset: int = 0) -> list[
 def recent_worklogs(conn: sqlite3.Connection, limit: int, offset: int = 0) -> list[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT w.*, c.primary_name FROM worklogs w
+        SELECT w.*, c.primary_name
+        FROM worklogs w
         JOIN creators c ON c.id = w.creator_id
         ORDER BY w.created_at DESC, w.id DESC
         LIMIT ? OFFSET ?

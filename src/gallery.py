@@ -22,6 +22,39 @@ from .utils import (
 )
 
 _gallery_dl = None
+_gallery_extractor = None
+
+PROFILE_LIKE_SUBCATEGORIES = {
+    "user",
+    "creator",
+    "profile",
+    "timeline",
+    "tweets",
+    "media",
+    "artworks",
+    "following",
+    "followers",
+    "avatar",
+    "background",
+    "info",
+    "likes",
+    "highlights",
+}
+POST_LIKE_SUBCATEGORIES = {
+    "post",
+    "tweet",
+    "work",
+    "status",
+    "quote",
+}
+PROFILE_LIKE_CLASS_TOKENS = ("userextractor", "creatorextractor", "profileextractor")
+POST_LIKE_CLASS_TOKENS = (
+    "postextractor",
+    "tweetextractor",
+    "workextractor",
+    "statusextractor",
+    "quoteextractor",
+)
 
 
 def _find_gallery_dl_exe() -> str | None:
@@ -64,6 +97,43 @@ def gallery_module_available() -> bool:
 
 def gallery_available() -> bool:
     return gallery_external_command() is not None or gallery_module_available()
+
+
+def _load_gallery_extractor() -> Any | None:
+    global _gallery_extractor
+    if _gallery_extractor is not None:
+        return _gallery_extractor
+    if not gallery_module_available():
+        return None
+    try:
+        from gallery_dl import extractor as gallery_extractor_module
+    except Exception:
+        return None
+    _gallery_extractor = gallery_extractor_module
+    return _gallery_extractor
+
+
+def classify_url_kind(url: str) -> str:
+    extractor_module = _load_gallery_extractor()
+    if extractor_module is None:
+        return "unknown"
+    try:
+        extractor = extractor_module.find(url)
+    except Exception:
+        return "unknown"
+    if extractor is None:
+        return "unknown"
+    subcategory = normalize_platform(getattr(extractor, "subcategory", None))
+    class_name = extractor.__class__.__name__.lower()
+    if subcategory in POST_LIKE_SUBCATEGORIES:
+        return "post-like"
+    if subcategory in PROFILE_LIKE_SUBCATEGORIES:
+        return "profile-like"
+    if any(token in class_name for token in POST_LIKE_CLASS_TOKENS):
+        return "post-like"
+    if any(token in class_name for token in PROFILE_LIKE_CLASS_TOKENS):
+        return "profile-like"
+    return "unknown"
 
 
 def parse_json_stream(output: str) -> list[Any]:

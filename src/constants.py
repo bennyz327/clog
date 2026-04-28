@@ -4,7 +4,7 @@ APP = "clog"
 DB_NAME = "clog.sqlite"
 CONFIG_NAME = "clog.json"
 LOG_NAME = "clog.log"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 
 class UserError(Exception):

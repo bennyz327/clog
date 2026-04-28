@@ -39,15 +39,17 @@ class TuiModalTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.app.form_action_running)
 
     async def test_add_name_action_opens_modal(self) -> None:
+        self.app.current_creator_id = 1
         async with self.app.run_test() as pilot:
             handled = await self.app.run_action("add_name")
             await pilot.pause()
             self.assertTrue(handled)
             self.assertEqual(len(self.app.screen_stack), 2)
             self.assertIsInstance(self.app.screen_stack[-1], RecordFormScreen)
-            self.assertEqual(self.app.screen_stack[-1].title, "Add Name Fact")
+            self.assertEqual(self.app.screen_stack[-1].title, "Add Name")
 
     async def test_cancel_closes_add_name_modal(self) -> None:
+        self.app.current_creator_id = 1
         async with self.app.run_test() as pilot:
             handled = await self.app.run_action("add_name")
             await pilot.pause()
