@@ -11,6 +11,7 @@ from .constants import AmbiguousTarget, UserError
 from .db import (
     candidate_lines,
     connect,
+    creator_label,
     due_rows,
     fetch_creator_snapshot,
     fetch_post_detail_row,
@@ -34,9 +35,11 @@ from .utils import json_loads, shorten, split_values
 _TEXTUAL_IMPORT_ERROR: Exception | None = None
 
 try:
+    from textual import events
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+    from textual.coordinate import Coordinate
     from textual.screen import ModalScreen
     from textual.widgets import (
         Button, DataTable, Footer, Header, Input,
@@ -46,6 +49,8 @@ except Exception as _exc:
     App = None  # type: ignore[assignment]
     ComposeResult = Any  # type: ignore[assignment]
     Binding = Any  # type: ignore[assignment]
+    events = None  # type: ignore[assignment]
+    Coordinate = None  # type: ignore[assignment]
     Container = Horizontal = Vertical = VerticalScroll = ModalScreen = object  # type: ignore[assignment]
     Button = DataTable = Footer = Header = Input = Static = TabbedContent = TabPane = TextArea = object  # type: ignore[assignment]
     _TEXTUAL_IMPORT_ERROR = _exc
@@ -171,6 +176,130 @@ if App is not None:
             LOGGER.info("TUI form submit: %s", self.title)
             self.dismiss(data)
 
+    class DetailScreen(ModalScreen[None]):
+        CSS = """
+        DetailScreen {
+            align: center middle;
+            background: rgba(3, 7, 18, 0.72);
+        }
+
+        #detail-modal {
+            width: 90%;
+            max-width: 110;
+            height: 90%;
+            padding: 1 2;
+            background: #101826;
+            border: round #3c7cff;
+        }
+
+        #detail-modal-title {
+            height: auto;
+            color: #f8fafc;
+            text-style: bold;
+            padding-bottom: 1;
+        }
+
+        #detail-modal-body {
+            height: 1fr;
+            background: #111b2d;
+            border: round #35557f;
+        }
+
+        #detail-modal-content {
+            padding: 1;
+        }
+
+        #detail-modal-buttons {
+            height: auto;
+            align-horizontal: right;
+            padding-top: 1;
+        }
+        """
+
+        BINDINGS = [Binding("escape", "dismiss", "Close", show=True)]
+
+        def __init__(self, title: str, body: Any) -> None:
+            super().__init__()
+            self.detail_title = title
+            self.detail_body = body
+
+        def compose(self) -> ComposeResult:
+            with Container(id="detail-modal"):
+                yield Static(self.detail_title, id="detail-modal-title")
+                with VerticalScroll(id="detail-modal-body"):
+                    yield Static(self.detail_body, id="detail-modal-content")
+                with Horizontal(id="detail-modal-buttons"):
+                    yield Button("Close", id="close", variant="primary")
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "close":
+                self.dismiss(None)
+
+    class ContextMenuScreen(ModalScreen[str | None]):
+        CSS = """
+        ContextMenuScreen {
+            align: center middle;
+            background: rgba(3, 7, 18, 0.72);
+        }
+
+        #ctx-menu {
+            width: 36;
+            height: auto;
+            padding: 1 2;
+            background: #101826;
+            border: round #3c7cff;
+        }
+
+        #ctx-menu-title {
+            text-style: bold;
+            color: #f8fafc;
+            padding-bottom: 1;
+        }
+
+        #ctx-menu Button {
+            width: 1fr;
+            margin-top: 1;
+        }
+        """
+
+        BINDINGS = [Binding("escape", "dismiss", "Close", show=True)]
+
+        def __init__(self, header: str) -> None:
+            super().__init__()
+            self.header = header
+
+        def compose(self) -> ComposeResult:
+            with Container(id="ctx-menu"):
+                yield Static(self.header, id="ctx-menu-title")
+                yield Button("View Detail", id="ctx-view")
+                yield Button("Add Name", id="ctx-name")
+                yield Button("Add URL", id="ctx-url")
+                yield Button("Record Post", id="ctx-post")
+                yield Button("Set Reminder", id="ctx-remind")
+                yield Button("Add Work", id="ctx-work")
+                yield Button("Cancel", id="ctx-cancel")
+
+        def on_mount(self) -> None:
+            try:
+                self.query_one("#ctx-view", Button).focus()
+            except Exception:
+                pass
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            bid = event.button.id or ""
+            if bid == "ctx-cancel":
+                self.dismiss(None)
+                return
+            mapping = {
+                "ctx-view": "view",
+                "ctx-name": "name",
+                "ctx-url": "url",
+                "ctx-post": "post",
+                "ctx-remind": "remind",
+                "ctx-work": "work",
+            }
+            self.dismiss(mapping.get(bid))
+
     class ClogApp(App[None]):
         TITLE = "CreatorLog"
         SUB_TITLE = "Interactive Mode"
@@ -192,27 +321,8 @@ if App is not None:
             border-bottom: solid #22324a;
         }
 
-        #search-label {
-            width: 9;
-            content-align: center middle;
-            color: #93c5fd;
-            text-style: bold;
-        }
-
         #search-input {
             width: 1fr;
-        }
-
-        #action-bar {
-            height: auto;
-            padding: 1;
-            background: #101826;
-            border-bottom: solid #22324a;
-        }
-
-        #action-bar Button {
-            margin-right: 1;
-            min-width: 11;
         }
 
         #body {
@@ -221,8 +331,8 @@ if App is not None:
         }
 
         #sidebar {
-            width: 32;
-            min-width: 28;
+            width: 30;
+            min-width: 24;
             padding: 1;
             background: #0f172a;
             border-right: solid #22324a;
@@ -230,12 +340,13 @@ if App is not None:
 
         #main {
             width: 1fr;
+            min-width: 20;
             padding: 1;
         }
 
         #detail {
-            width: 46;
-            min-width: 38;
+            width: 40;
+            min-width: 30;
             padding: 1;
             background: #0f172a;
             border-left: solid #22324a;
@@ -258,7 +369,8 @@ if App is not None:
         }
 
         #due-table {
-            height: 12;
+            height: 1fr;
+            max-height: 16;
         }
 
         #page-bar {
@@ -306,10 +418,18 @@ if App is not None:
         Footer {
             background: #101826;
         }
+
+        /* Responsive class rules toggled by on_resize */
+        #chrome.narrow #sidebar { display: none; }
+        #chrome.narrow #detail { display: none; }
+        #chrome.narrow #prev-page { display: none; }
+        #chrome.narrow #next-page { display: none; }
+        #chrome.medium #detail { display: none; }
         """
 
         BINDINGS = [
             Binding("/", "focus_search", "Search", show=True),
+            Binding("m", "open_menu", "Menu", show=True),
             Binding("ctrl+a", "add_creator", "Add", show=True),
             Binding("ctrl+n", "add_name", "Name", show=True),
             Binding("ctrl+u", "add_url", "URL", show=True),
@@ -351,16 +471,7 @@ if App is not None:
             yield Header(show_clock=True)
             with Container(id="chrome"):
                 with Horizontal(id="search-row"):
-                    yield Static("SEARCH", id="search-label")
-                    yield Input(placeholder="Search creators, urls, platform ids, posts, work...", id="search-input")
-                with Horizontal(id="action-bar"):
-                    yield Button("Add Creator", id="btn-add", variant="primary")
-                    yield Button("Add Name", id="btn-name")
-                    yield Button("Add URL", id="btn-url")
-                    yield Button("Record Post", id="btn-post")
-                    yield Button("Remind", id="btn-remind")
-                    yield Button("Add Work", id="btn-work")
-                    yield Button("Refresh", id="btn-refresh")
+                    yield Input(placeholder="Search creators, urls, platform ids, posts, work... (m: row menu)", id="search-input")
                 with Horizontal(id="body"):
                     with Vertical(id="sidebar"):
                         yield Static("Due Reminders", classes="pane-title")
@@ -390,6 +501,7 @@ if App is not None:
         def on_mount(self) -> None:
             LOGGER.info("TUI mount db=%s log=%s", self.db_path, log_path())
             self.configure_tables()
+            self.apply_size_class(self.size.width)
             self.refresh_all()
             self.query_one("#search-input", Input).focus()
 
@@ -397,6 +509,101 @@ if App is not None:
             for task in list(self.pending_tasks):
                 task.cancel()
             self.pending_tasks.clear()
+
+        def apply_size_class(self, width: int) -> None:
+            try:
+                chrome = self.query_one("#chrome")
+            except Exception:
+                return
+            chrome.set_class(width < 80, "narrow")
+            chrome.set_class(80 <= width < 120, "medium")
+            chrome.set_class(width >= 120, "wide")
+
+        def on_resize(self, event: events.Resize) -> None:
+            previous_wide = self.is_wide()
+            self.apply_size_class(event.size.width)
+            now_wide = self.is_wide()
+            if now_wide and not previous_wide and self.current_detail_kind and self.current_detail_id:
+                try:
+                    self.set_detail(self.current_detail_kind, self.current_detail_id)
+                except UserError:
+                    pass
+
+        def get_active_table(self) -> Any:
+            focused = self.focused
+            if isinstance(focused, DataTable):
+                return focused
+            try:
+                active = self.query_one("#main-tabs", TabbedContent).active
+            except Exception:
+                return None
+            pane_to_table = {
+                "search-pane": "#search-table",
+                "creators-pane": "#creators-table",
+                "posts-pane": "#posts-table",
+                "work-pane": "#work-table",
+            }
+            table_id = pane_to_table.get(active)
+            if table_id is None:
+                return None
+            try:
+                return self.query_one(table_id, DataTable)
+            except Exception:
+                return None
+
+        def on_click(self, event: events.Click) -> None:
+            if getattr(event, "button", 1) != 3:
+                return
+            if not isinstance(self.focused, DataTable):
+                return
+            self.action_open_menu()
+
+        def action_open_menu(self) -> None:
+            table = self.get_active_table()
+            if table is None or table.row_count == 0 or table.cursor_row < 0:
+                return
+            try:
+                cell_key = table.coordinate_to_cell_key(Coordinate(table.cursor_row, 0))
+                row_key = cell_key.row_key
+            except Exception:
+                return
+            entity_id = self.row_key_value(row_key)
+            if entity_id is None:
+                return
+            table_id = table.id or ""
+            kind = self.kind_for_table(table_id)
+            if kind is None:
+                return
+            try:
+                creator_id, _, _ = self.compute_detail(kind, entity_id)
+            except UserError as exc:
+                self.notify_user_error(exc)
+                return
+            self.current_creator_id = creator_id
+            self.current_detail_kind = kind
+            self.current_detail_id = entity_id
+            try:
+                header = creator_label(self.conn, creator_id)
+            except Exception:
+                header = f"#{creator_id}"
+
+            def on_dismiss(action: str | None) -> None:
+                if action is None:
+                    return
+                if action == "view":
+                    self.show_detail(kind, entity_id)
+                elif action == "name":
+                    self.action_add_name()
+                elif action == "url":
+                    self.action_add_url()
+                elif action == "post":
+                    self.action_add_post()
+                elif action == "remind":
+                    self.action_add_reminder()
+                elif action == "work":
+                    self.action_add_work()
+
+            self.push_screen(ContextMenuScreen(header), callback=on_dismiss)
 
         def configure_tables(self) -> None:
             for table_id, columns in {
@@ -439,38 +646,68 @@ if App is not None:
             }
             return mapping.get(active)
 
-        def set_detail(self, kind: str, entity_id: int) -> None:
+        def is_wide(self) -> bool:
             try:
-                title = self.query_one("#detail-title", Static)
-                body = self.query_one("#detail-content", Static)
+                return self.query_one("#chrome").has_class("wide")
             except Exception:
-                self.current_detail_kind = kind
-                self.current_detail_id = entity_id
-                return
+                return False
+
+        def compute_detail(self, kind: str, entity_id: int) -> tuple[int, str, Any]:
             if kind == "creator":
                 snapshot = fetch_creator_snapshot(self.conn, entity_id)
                 creator = snapshot["creator"]
-                self.current_creator_id = int(creator["id"])
-                self.current_detail_kind = kind
-                self.current_detail_id = entity_id
-                title.update(f"Creator #{creator['id']} {creator['primary_name']}")
-                body.update(render_creator_snapshot(snapshot))
-                return
+                return (
+                    int(creator["id"]),
+                    f"Creator #{creator['id']} {creator['primary_name']}",
+                    render_creator_snapshot(snapshot),
+                )
             if kind == "post":
                 row = fetch_post_detail_row(self.conn, entity_id)
-                self.current_creator_id = int(row["creator_id"])
-                self.current_detail_kind = kind
-                self.current_detail_id = entity_id
-                title.update(f"Post {row['id']} -> #{row['creator_id']} {row['primary_name']}")
-                body.update(render_post_detail(row))
-                return
+                return (
+                    int(row["creator_id"]),
+                    f"Post {row['id']} -> #{row['creator_id']} {row['primary_name']}",
+                    render_post_detail(row),
+                )
             if kind == "work":
                 row = fetch_work_detail_row(self.conn, entity_id)
-                self.current_creator_id = int(row["creator_id"])
-                self.current_detail_kind = kind
-                self.current_detail_id = entity_id
-                title.update(f"Work {row['id']} -> #{row['creator_id']} {row['primary_name']}")
-                body.update(render_work_detail(row))
+                return (
+                    int(row["creator_id"]),
+                    f"Work {row['id']} -> #{row['creator_id']} {row['primary_name']}",
+                    render_work_detail(row),
+                )
+            raise UserError(f"Unknown detail kind: {kind}")
+
+        def write_side_detail(self, title_str: str, body: Any) -> None:
+            try:
+                self.query_one("#detail-title", Static).update(title_str)
+                self.query_one("#detail-content", Static).update(body)
+            except Exception:
+                pass
+
+        def set_detail(self, kind: str, entity_id: int) -> None:
+            try:
+                creator_id, title_str, body = self.compute_detail(kind, entity_id)
+            except UserError:
+                return
+            self.current_creator_id = creator_id
+            self.current_detail_kind = kind
+            self.current_detail_id = entity_id
+            if self.is_wide():
+                self.write_side_detail(title_str, body)
+
+        def show_detail(self, kind: str, entity_id: int) -> None:
+            try:
+                creator_id, title_str, body = self.compute_detail(kind, entity_id)
+            except UserError as exc:
+                self.notify_user_error(exc)
+                return
+            self.current_creator_id = creator_id
+            self.current_detail_kind = kind
+            self.current_detail_id = entity_id
+            if self.is_wide():
+                self.write_side_detail(title_str, body)
+            else:
+                self.push_screen(DetailScreen(title_str, body))
 
         def ensure_default_detail(self) -> None:
             if self.current_detail_kind == "creator" and self.current_detail_id:
@@ -643,25 +880,35 @@ if App is not None:
                 except UserError as exc:
                     self.notify_user_error(exc)
 
-        def handle_table_pick(self, table_id: str, row_key: Any) -> None:
+        def kind_for_table(self, table_id: str) -> str | None:
+            if table_id in {"due-table", "sidebar-creators", "search-table", "creators-table"}:
+                return "creator"
+            if table_id == "posts-table":
+                return "post"
+            if table_id == "work-table":
+                return "work"
+            return None
+
+        def handle_table_pick(self, table_id: str, row_key: Any, *, force_modal: bool = False) -> None:
             entity_id = self.row_key_value(row_key)
             if entity_id is None:
                 return
+            kind = self.kind_for_table(table_id)
+            if kind is None:
+                return
             try:
-                if table_id in {"due-table", "sidebar-creators", "search-table", "creators-table"}:
-                    self.set_detail("creator", entity_id)
-                elif table_id == "posts-table":
-                    self.set_detail("post", entity_id)
-                elif table_id == "work-table":
-                    self.set_detail("work", entity_id)
+                if force_modal:
+                    self.show_detail(kind, entity_id)
+                else:
+                    self.set_detail(kind, entity_id)
             except UserError as exc:
                 self.notify_user_error(exc)
 
         def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-            self.handle_table_pick(event.data_table.id or "", event.row_key)
+            self.handle_table_pick(event.data_table.id or "", event.row_key, force_modal=True)
 
         def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-            self.handle_table_pick(event.data_table.id or "", event.row_key)
+            self.handle_table_pick(event.data_table.id or "", event.row_key, force_modal=False)
 
         def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
             self.refresh_page_bar()
@@ -697,13 +944,6 @@ if App is not None:
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             actions = {
-                "btn-add": self.action_add_creator,
-                "btn-name": self.action_add_name,
-                "btn-url": self.action_add_url,
-                "btn-post": self.action_add_post,
-                "btn-remind": self.action_add_reminder,
-                "btn-work": self.action_add_work,
-                "btn-refresh": self.action_refresh_data,
                 "prev-page": self.action_prev_page,
                 "next-page": self.action_next_page,
             }
@@ -783,8 +1023,7 @@ if App is not None:
                     note=data["note"] or None,
                 )
                 self.refresh_all()
-                self.set_detail("creator", int(result["creator_id"]))
-                from .db import creator_label
+                self.show_detail("creator", int(result["creator_id"]))
                 self.notify(f"Added {creator_label(self.conn, int(result['creator_id']))}", severity="information")
             except UserError as exc:
                 self.notify_user_error(exc)
@@ -824,7 +1063,7 @@ if App is not None:
                     note=data["note"] or None,
                 )
                 self.refresh_all()
-                self.set_detail("creator", int(result["creator_id"]))
+                self.show_detail("creator", int(result["creator_id"]))
                 self.notify("Name fact added", severity="information")
             except UserError as exc:
                 self.notify_user_error(exc)
@@ -864,7 +1103,7 @@ if App is not None:
                     note=data["note"] or None,
                 )
                 self.refresh_all()
-                self.set_detail("creator", int(result["creator_id"]))
+                self.show_detail("creator", int(result["creator_id"]))
                 self.notify("URL fact added", severity="information")
             except UserError as exc:
                 self.notify_user_error(exc)
@@ -902,7 +1141,7 @@ if App is not None:
                     timeout=timeout,
                 )
                 self.refresh_all()
-                self.set_detail("post", int(result["post_id"]))
+                self.show_detail("post", int(result["post_id"]))
                 if result["warning"]:
                     self.notify(result["warning"], severity="warning", timeout=6)
                 else:
@@ -945,7 +1184,7 @@ if App is not None:
                     note=data["note"] or None,
                 )
                 self.refresh_all()
-                self.set_detail("creator", int(result["creator_id"]))
+                self.show_detail("creator", int(result["creator_id"]))
                 self.notify(f"Reminder set for {result['due_at']}", severity="information")
             except UserError as exc:
                 self.notify_user_error(exc)
@@ -987,7 +1226,7 @@ if App is not None:
                     metadata=metadata,
                 )
                 self.refresh_all()
-                self.set_detail("work", int(result["work_id"]))
+                self.show_detail("work", int(result["work_id"]))
                 self.notify("Work log added", severity="information")
             except UserError as exc:
                 self.notify_user_error(exc)
