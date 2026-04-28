@@ -15,3 +15,8 @@ clog.sqlite
 clog.sqlite-wal
 clog.sqlite-shm
 clog.log
+
+.idea
+
+# build
+clog.exe
