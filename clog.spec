@@ -326,6 +326,7 @@ exe = EXE(
     exclude_binaries=True,
     contents_directory='lib',    # hydrus-style: dist/clog/lib/ (default would be _internal)
     name='clog',
+    icon='static\\clog.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
