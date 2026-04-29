@@ -141,13 +141,6 @@ def unique_messages(messages: list[str]) -> list[str]:
     return result
 
 
-def prompt_input(prompt: str, default: str = "") -> str:
-    try:
-        return input(prompt)
-    except EOFError:
-        return default
-
-
 def parse_when(value: str) -> tuple[str, int | None]:
     raw = value.strip().lower()
     base = today()

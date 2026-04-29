@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import ConflictError, UserError
-from .db import (
+from db import (
     creator_label,
     delete_profile_if_orphaned,
     insert_alias,
@@ -28,7 +28,6 @@ from .db import (
 )
 from .gallery import classify_url_kind, extract_metadata, run_gallery_metadata
 from .utils import canonical_url, infer_platform_from_url, is_url, now_iso
-from .worker import maybe_spawn_metadata_worker
 
 
 def _profile_lookup_message(platform: str | None, platform_id: str | None) -> str:
@@ -206,7 +205,7 @@ def attach_profile_url(
 
 def add_creator_record(
     conn: sqlite3.Connection,
-    db_path: Path,
+    _db_path: Path,
     name: str,
     *,
     url: str | None = None,
@@ -224,17 +223,16 @@ def add_creator_record(
                 source="initial-url",
             )
         sync_creator_search(conn, creator_id)
-    if url and attached and attached["needs_worker"]:
-        maybe_spawn_metadata_worker(db_path)
     return {
         "creator_id": creator_id,
         "warning": attached["warning"] if attached else None,
+        "needs_worker": bool(attached and attached.get("needs_worker")),
     }
 
 
 def add_name_record(
     conn: sqlite3.Connection,
-    db_path: Path,
+    _db_path: Path,
     target: str,
     name: str,
     *,
@@ -277,7 +275,7 @@ def add_name_record(
                 )
             if len(profile_rows) > 1:
                 raise UserError(
-                    f"Multiple profiles exist on {context}. Use a creator URL or the TUI profile picker."
+                    f"Multiple profiles exist on {context}. Use a creator URL to disambiguate."
                 )
             alias_id = insert_alias(
                 conn,
@@ -295,19 +293,18 @@ def add_name_record(
                 reason="generic-alias",
             )
         sync_creator_search(conn, creator_id)
-    if attached and attached["needs_worker"]:
-        maybe_spawn_metadata_worker(db_path)
     return {
         "creator_id": creator_id,
         "profile_id": attached["profile_id"] if attached else profile_id,
         "alias_id": alias_id,
         "warning": attached["warning"] if attached else None,
+        "needs_worker": bool(attached and attached.get("needs_worker")),
     }
 
 
 def add_url_record(
     conn: sqlite3.Connection,
-    db_path: Path,
+    _db_path: Path,
     target: str,
     url: str,
     *,
@@ -323,8 +320,6 @@ def add_url_record(
             source="manual-url",
         )
         sync_creator_search(conn, creator_id)
-    if attached["needs_worker"]:
-        maybe_spawn_metadata_worker(db_path)
     return attached
 
 

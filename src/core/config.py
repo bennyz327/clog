@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -7,40 +8,85 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from .constants import APP, CONFIG_NAME, DB_NAME, LOG_NAME, UserError
+from .constants import APP, CONFIG_NAME, DB_DIR_NAME, DB_NAME, LOG_NAME, UserError
 
 
 def app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
-    # __file__ is src/config.py → parent is src/ → parent is project root
-    return Path(__file__).resolve().parent.parent
+    # __file__ is src/core/config.py → 3 levels up is project root
+    return Path(__file__).resolve().parents[2]
+
+
+def db_dir() -> Path:
+    """User-data directory: holds the sqlite db, config, log. Created on first
+    write (first launch). Hydrus uses the same `db/` convention next to the exe."""
+    return app_dir() / DB_DIR_NAME
+
+
+def _ensure_db_dir() -> bool:
+    try:
+        db_dir().mkdir(parents=True, exist_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 def config_path() -> Path:
-    return app_dir() / CONFIG_NAME
+    return db_dir() / CONFIG_NAME
 
 
 def log_path() -> Path:
-    return app_dir() / LOG_NAME
+    return db_dir() / LOG_NAME
 
 
-def setup_logging() -> logging.Logger:
+def _base_logger() -> logging.Logger:
     logger = logging.getLogger(APP)
-    if logger.handlers:
-        return logger
     logger.setLevel(logging.INFO)
-    try:
-        handler = RotatingFileHandler(log_path(), maxBytes=1_000_000, backupCount=3, encoding="utf-8")
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-        logger.addHandler(handler)
-    except (OSError, ValueError):
-        logger.addHandler(logging.NullHandler())
     logger.propagate = False
+    if not logger.handlers:
+        logger.addHandler(logging.NullHandler())
     return logger
 
 
-LOGGER = setup_logging()
+def setup_logging() -> logging.Logger:
+    logger = _base_logger()
+    if logger.handlers:
+        non_null_handlers = [handler for handler in logger.handlers if not isinstance(handler, logging.NullHandler)]
+        if non_null_handlers:
+            return logger
+    try:
+        if not _ensure_db_dir():
+            raise OSError(f"could not create {db_dir()}")
+        handler = RotatingFileHandler(log_path(), maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.handlers = [existing for existing in logger.handlers if not isinstance(existing, logging.NullHandler)]
+        logger.addHandler(handler)
+    except (OSError, ValueError):
+        logger.handlers = [existing for existing in logger.handlers if not isinstance(existing, logging.NullHandler)]
+        logger.addHandler(logging.NullHandler())
+    return logger
+
+
+def shutdown_logging() -> None:
+    logger = logging.getLogger(APP)
+    handlers = list(logger.handlers)
+    for handler in handlers:
+        handler.close()
+        logger.removeHandler(handler)
+    logger.addHandler(logging.NullHandler())
+
+
+class _LazyLoggerProxy:
+    def _logger(self) -> logging.Logger:
+        return setup_logging()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._logger(), name)
+
+
+LOGGER = _LazyLoggerProxy()
+atexit.register(shutdown_logging)
 
 
 def log_exception(context: str, exc: BaseException) -> None:
@@ -69,6 +115,7 @@ def write_default_config(path: Path | None = None) -> None:
     resolved_path = config_path() if path is None else path
     if resolved_path.exists():
         return
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "db_path": DB_NAME,
         "gallery_dl_command": None,
@@ -82,8 +129,8 @@ def default_db_path() -> Path:
     configured = cfg.get("db_path")
     if configured:
         p = Path(str(configured))
-        return p if p.is_absolute() else app_dir() / p
-    return app_dir() / DB_NAME
+        return p if p.is_absolute() else db_dir() / p
+    return db_dir() / DB_NAME
 
 
 def parse_global_options(argv: list[str]) -> tuple[Path, bool, list[str]]:
