@@ -2,6 +2,10 @@
    Indicator colours taken from hydrus default_hydrus_dark.qss.
    Structural rules added for the widgets clog actually uses. */
 
+QMainWindow, QWidget {
+    color: #dcdcdc;
+}
+
 QToolBar {
     spacing: 4px;
     padding: 2px;
@@ -43,6 +47,40 @@ QSplitter::handle {
 
 QPlainTextEdit, QTextEdit {
     font-family: "Cascadia Mono", "Consolas", "Courier New", monospace;
+}
+
+QFrame#NotificationManager {
+    background: transparent;
+}
+
+QFrame#NotificationCard-info,
+QFrame#NotificationCard-success,
+QFrame#NotificationCard-warning,
+QFrame#NotificationCard-error {
+    border: 1px solid #1f2123;
+    border-radius: 8px;
+    background-color: #2f3337;
+    min-width: 320px;
+    max-width: 420px;
+}
+
+QFrame#NotificationCard-success {
+    border-color: #2f6b36;
+    background-color: #233126;
+}
+
+QFrame#NotificationCard-warning {
+    border-color: #8b6d1a;
+    background-color: #3a3220;
+}
+
+QFrame#NotificationCard-error {
+    border-color: #8d3a3a;
+    background-color: #3a2323;
+}
+
+QLabel#NotificationTitle {
+    font-weight: bold;
 }
 
 /* hydrus indicator colours (dark variants) */

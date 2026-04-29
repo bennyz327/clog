@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,15 +14,18 @@ from db import (
     fetch_creator_snapshot,
     fetch_post_detail_row,
     fetch_work_detail_row,
+    get_app_setting,
     grouped_search,
+    list_app_settings,
     rebuild_search,
     recent_creators,
     recent_posts,
     recent_worklogs,
     resolve_target,
     search_rows,
+    set_app_setting,
 )
-from .config import LOGGER, load_config, write_default_config
+from .config import LOGGER, write_default_config
 from .enrichment import InProcessRunner
 from .jobs import JobPool
 from .pubsub import PubSub
@@ -47,7 +51,7 @@ class Controller:
     def __init__(self, db_path: Path, *, headless: bool = False) -> None:
         write_default_config()
         self.db_path = db_path
-        self.options: dict[str, Any] = load_config()
+        os.environ["CLOG_DB_PATH"] = str(db_path)
         self.pubsub = PubSub()
         self.jobs = JobPool()
         self._db_lock = RLock()
@@ -70,6 +74,19 @@ class Controller:
             raise KeyError(f"unknown read action: {action}")
         with self.db() as conn:
             return fn(conn, *args, **kwargs)
+
+    def get_setting(self, scope: str, key: str, default: Any = None) -> Any:
+        with self.db() as conn:
+            return get_app_setting(conn, scope, key, default)
+
+    def set_setting(self, scope: str, key: str, value: Any) -> None:
+        with self.db() as conn:
+            set_app_setting(conn, scope, key, value)
+            conn.commit()
+
+    def list_settings(self, scope: str | None = None) -> dict[str, dict[str, Any]]:
+        with self.db() as conn:
+            return list_app_settings(conn, scope)
 
     def write(self, action: str, *args: Any, **kwargs: Any) -> Any:
         fn = self._write_actions.get(action)

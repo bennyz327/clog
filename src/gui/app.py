@@ -20,11 +20,11 @@ def main() -> int:
     db_path = default_db_path()
     controller = Controller(db_path)
 
-    theme_pref = controller.options.get("theme")
+    theme_pref = controller.get_setting("user", "theme", "light")
     theme: ThemeName = "dark" if theme_pref == "dark" else "light"
     apply_theme(app, theme)
 
-    bridge = QtPubSubBridge(controller.pubsub)
+    bridge = QtPubSubBridge(controller.pubsub, app)
     window = ClogMainWindow(controller, bridge)
     window.show()
 

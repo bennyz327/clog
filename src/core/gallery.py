@@ -10,7 +10,8 @@ import subprocess
 import sys
 from typing import Any
 
-from .config import LOGGER, app_dir, load_config
+from db import read_app_setting
+from .config import LOGGER, app_dir, default_db_path
 from .utils import (
     CaptureIO,
     infer_platform_from_url,
@@ -79,8 +80,7 @@ def _find_gallery_dl_exe() -> str | None:
 
 
 def gallery_external_command() -> list[str] | None:
-    cfg = load_config()
-    configured = cfg.get("gallery_dl_command")
+    configured = _system_setting("gallery_dl_command")
     if configured:
         if isinstance(configured, list):
             return [str(x) for x in configured]
@@ -89,6 +89,14 @@ def gallery_external_command() -> list[str] | None:
     if exe:
         return [exe]
     return None
+
+
+def _system_setting(key: str, default: Any = None) -> Any:
+    try:
+        db_path = Path(os.environ.get("CLOG_DB_PATH") or default_db_path())
+        return read_app_setting(db_path, "system", key, default)
+    except Exception:
+        return default
 
 
 def gallery_module_available() -> bool:

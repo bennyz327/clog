@@ -7,11 +7,12 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .config import LOGGER, app_dir, load_config
+from .config import LOGGER, app_dir
 from .constants import ConflictError
 from db import (
     connect,
     delete_profile_if_orphaned,
+    get_app_setting,
     profile_row,
     profile_row_by_identity,
     sync_creator_search,
@@ -198,8 +199,11 @@ class SubprocessDriver:
             return
         if not gallery_available():
             return
-        cfg = load_config()
-        limit = str(int(cfg.get("metadata_worker_limit") or 5))
+        conn = connect(db_path)
+        try:
+            limit = str(int(get_app_setting(conn, "system", "metadata_worker_limit", 5) or 5))
+        finally:
+            conn.close()
         worker_exe = _resolve_worker_executable()
         if worker_exe is not None:
             command = [str(worker_exe), "--db", str(db_path), "__meta_worker", "--limit", limit]
@@ -243,10 +247,9 @@ class InProcessRunner:
         self._controller.jobs.submit(self._run_once)
 
     def _run_once(self) -> None:
-        cfg = load_config()
-        limit = int(cfg.get("metadata_worker_limit") or 5)
         try:
             with self._controller.db() as conn:
+                limit = int(get_app_setting(conn, "system", "metadata_worker_limit", 5) or 5)
                 processed = enrich_pending_profiles(conn, limit)
         except Exception as exc:
             LOGGER.exception("Enrichment in-process run failed: %s", exc)

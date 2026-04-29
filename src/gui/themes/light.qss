@@ -1,38 +1,124 @@
 /* clog light theme.
-   Indicator colours taken from hydrus default_hydrus.qss.
-   Structural rules added for the widgets clog actually uses. */
+   Warm paper UI with explicit full-widget coverage to avoid dark/light mixing. */
+
+QMainWindow, QWidget {
+    color: #1f2328;
+}
+
+QMenuBar, QMenu, QToolBar, QStatusBar, QTabWidget::pane, QSplitter::handle {
+    background-color: #f1ebdf;
+    color: #1f2328;
+}
+
+QMenuBar {
+    border-bottom: 1px solid #d8cfbf;
+}
+
+QMenu {
+    border: 1px solid #d8cfbf;
+}
 
 QToolBar {
     spacing: 4px;
-    padding: 2px;
+    padding: 4px;
+    border-bottom: 1px solid #d8cfbf;
 }
 
-QToolButton {
+QToolButton, QPushButton {
+    background-color: #ede4d7;
+    color: #1f2328;
+    border: 1px solid #cdbfa9;
+    border-radius: 4px;
     padding: 4px 8px;
 }
 
-QStatusBar {
-    border-top: 1px solid #cccccc;
+QToolButton:hover, QPushButton:hover {
+    background-color: #e3d7c5;
+}
+
+QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QTableWidget, QTabWidget, QSplitter, QDialog {
+    background-color: #fffdf9;
+    color: #1f2328;
+}
+
+QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox {
+    border: 1px solid #d8cfbf;
+    border-radius: 4px;
+    padding: 4px;
+    selection-background-color: #b9d9ff;
+    selection-color: #11253b;
 }
 
 QHeaderView::section {
-    background-color: #f0f0f0;
+    background-color: #ebe1d3;
+    color: #1f2328;
     padding: 4px;
-    border: 1px solid #d0d0d0;
+    border: 1px solid #d8cfbf;
 }
 
 QTableView {
-    alternate-background-color: #f7f7f7;
-    gridline-color: #e0e0e0;
+    alternate-background-color: #f4efe8;
+    gridline-color: #ddd4c7;
+    selection-background-color: #d9ebff;
+    selection-color: #11253b;
 }
 
 QTableView::item:selected {
-    background-color: #d9f2ff;
-    color: #000000;
+    background-color: #d9ebff;
+    color: #11253b;
+}
+
+QTabBar::tab {
+    background: #ede4d7;
+    color: #1f2328;
+    padding: 6px 10px;
+    border: 1px solid #d8cfbf;
+}
+
+QTabBar::tab:selected {
+    background: #fffdf9;
+}
+
+QStatusBar {
+    border-top: 1px solid #d8cfbf;
 }
 
 QPlainTextEdit, QTextEdit {
     font-family: "Cascadia Mono", "Consolas", "Courier New", monospace;
+}
+
+QFrame#NotificationManager {
+    background: transparent;
+}
+
+QFrame#NotificationCard-info,
+QFrame#NotificationCard-success,
+QFrame#NotificationCard-warning,
+QFrame#NotificationCard-error {
+    border: 1px solid #d8cfbf;
+    border-radius: 8px;
+    background-color: #fffaf2;
+    min-width: 320px;
+    max-width: 420px;
+}
+
+QFrame#NotificationCard-success {
+    border-color: #8fb08d;
+    background-color: #f4fbf1;
+}
+
+QFrame#NotificationCard-warning {
+    border-color: #d0a646;
+    background-color: #fff7df;
+}
+
+QFrame#NotificationCard-error {
+    border-color: #c66d6d;
+    background-color: #fff0f0;
+}
+
+QLabel#NotificationTitle {
+    font-weight: bold;
 }
 
 /* hydrus indicator colours */

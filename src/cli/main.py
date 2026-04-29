@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 
 from core.constants import AmbiguousTarget, UserError
@@ -13,6 +14,7 @@ def main(argv: list[str] | None = None) -> int:
     effective_argv = list(sys.argv[1:] if argv is None else argv)
     try:
         db_path, quiet, rest = parse_global_options(effective_argv)
+        os.environ["CLOG_DB_PATH"] = str(db_path)
         return dispatch(db_path, quiet, rest)
     except AmbiguousTarget as exc:
         LOGGER.warning("Ambiguous target: %s", exc.target)

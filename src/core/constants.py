@@ -5,7 +5,7 @@ DB_DIR_NAME = "db"
 DB_NAME = "clog.sqlite"
 CONFIG_NAME = "clog.json"
 LOG_NAME = "clog.log"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class UserError(Exception):

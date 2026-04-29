@@ -124,12 +124,11 @@ def write_default_config(path: Path | None = None) -> None:
     resolved_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def load_legacy_config() -> dict[str, Any]:
+    return load_config()
+
+
 def default_db_path() -> Path:
-    cfg = load_config()
-    configured = cfg.get("db_path")
-    if configured:
-        p = Path(str(configured))
-        return p if p.is_absolute() else db_dir() / p
     return db_dir() / DB_NAME
 
 

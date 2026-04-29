@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMenu,
-    QMessageBox,
     QPlainTextEdit,
     QSplitter,
     QTabWidget,
@@ -41,6 +40,7 @@ from .dialogs import (
     AddWorkDialog,
     SetReminderDialog,
 )
+from .notifications import NotificationManager, NotificationPayload
 from .pubsub_bridge import QtPubSubBridge
 from .themes import ThemeName, apply_theme, available_themes
 
@@ -56,6 +56,7 @@ class ClogMainWindow(QMainWindow):
         self._bridge = bridge
         self._current_creator_id: int | None = None
         self._search_groups: list[dict[str, Any]] = []
+        self._notifications = NotificationManager(self)
 
         self._build_toolbar()
         self._build_central()
@@ -174,7 +175,6 @@ class ClogMainWindow(QMainWindow):
         pass
 
     def _wire_pubsub(self) -> None:
-        bridge = self._bridge
         for action in (
             "add_creator",
             "add_name",
@@ -183,8 +183,9 @@ class ClogMainWindow(QMainWindow):
             "set_reminder",
             "add_work",
         ):
-            bridge.sub(f"data.{action}", lambda **_kw: self.refresh_all())
-        bridge.sub("enrichment.completed", lambda **_kw: self._on_enrichment_completed())
+            self._controller.pubsub.sub(self, "_on_data_changed", f"data.{action}")
+        self._controller.pubsub.sub(self, "_on_enrichment_completed", "enrichment.completed")
+        self._controller.pubsub.sub(self, "_on_message", "message")
 
     # ── helpers ──────────────────────────────────────────────────────────
     def _make_table(
@@ -232,6 +233,50 @@ class ClogMainWindow(QMainWindow):
         item = table.item(row, 0)
         return None if item is None else item.data(Qt.ItemDataRole.UserRole)
 
+    def _notify(
+        self,
+        title: str,
+        text: str,
+        *,
+        level: str = "info",
+        detail: str | None = None,
+        sticky: bool = False,
+        timeout_ms: int = 4500,
+    ) -> None:
+        self._controller.pubsub.pub(
+            "message",
+            payload=NotificationPayload(
+                title=title,
+                text=text,
+                level=level,
+                detail=detail,
+                sticky=sticky,
+                timeout_ms=timeout_ms,
+            ),
+        )
+
+    def _on_message(self, payload: NotificationPayload | dict[str, Any] | str) -> None:
+        self._notifications.add_message(payload)
+
+    def _on_data_changed(self, **_kwargs: Any) -> None:
+        self.refresh_all()
+
+    def _on_enrichment_completed(self, processed: int | None = None, **_kwargs: Any) -> None:
+        count = int(processed or 0)
+        self.statusBar().showMessage("metadata enrichment finished", 4000)
+        self._refresh_creators()
+        if self._current_creator_id is not None:
+            try:
+                snapshot = self._controller.read("creator_snapshot", self._current_creator_id)
+                self._show_creator_detail(snapshot)
+            except Exception:
+                pass
+        self._notify(
+            "Metadata Enrichment",
+            f"Finished background metadata enrichment for {count} profile(s)." if count else "Finished background metadata enrichment.",
+            level="success",
+        )
+
     # ── refresh ──────────────────────────────────────────────────────────
     def refresh_all(self) -> None:
         try:
@@ -243,6 +288,7 @@ class ClogMainWindow(QMainWindow):
                 self._run_search(silent=True)
         except Exception as exc:
             LOGGER.exception("Refresh failed: %s", exc)
+            self._notify("Refresh Failed", str(exc), level="error", detail=repr(exc), sticky=True)
 
     def _refresh_creators(self) -> None:
         rows = self._controller.read("recent_creators", DEFAULT_RECENT_LIMIT, 0)
@@ -398,7 +444,7 @@ class ClogMainWindow(QMainWindow):
         except Exception as exc:
             LOGGER.exception("search failed: %s", exc)
             if not silent:
-                QMessageBox.critical(self, "Search", str(exc))
+                self._notify("Search Failed", str(exc), level="error", detail=repr(exc), sticky=True)
             return
         self._search_groups = groups
         table = self._search_table
@@ -428,17 +474,6 @@ class ClogMainWindow(QMainWindow):
         self._tabs.setCurrentIndex(0)
         if not silent:
             self.statusBar().showMessage(f"search: {len(groups)} group(s) for {query!r}", 5000)
-
-    # ── enrichment ─────────────────────────────────────────────────────
-    def _on_enrichment_completed(self) -> None:
-        self.statusBar().showMessage("metadata enrichment finished", 4000)
-        self._refresh_creators()
-        if self._current_creator_id is not None:
-            try:
-                snapshot = self._controller.read("creator_snapshot", self._current_creator_id)
-                self._show_creator_detail(snapshot)
-            except Exception:
-                pass
 
     # ── context menus ──────────────────────────────────────────────────
     def _creators_context_menu(self, pos) -> None:
@@ -491,8 +526,9 @@ class ClogMainWindow(QMainWindow):
         if app is None:
             return
         apply_theme(app, name)
-        self._controller.options["theme"] = name
+        self._controller.set_setting("user", "theme", name)
         self.statusBar().showMessage(f"theme: {name}", 3000)
+        self._notify("Theme Updated", f"Switched theme to {name}.", level="success", timeout_ms=2500)
 
     # ── lifecycle ──────────────────────────────────────────────────────
     def closeEvent(self, event) -> None:

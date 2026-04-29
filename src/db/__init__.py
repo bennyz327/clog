@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from core.config import LOGGER
+from core.config import LOGGER, load_legacy_config
 from core.constants import AmbiguousTarget, ConflictError, SCHEMA_VERSION, UserError
 from core.utils import (
     canonical_url,
@@ -173,6 +173,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS app_settings (
+            scope TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(scope, key)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_creator_aliases_creator ON creator_aliases(creator_id);
         CREATE INDEX IF NOT EXISTS idx_creator_aliases_name ON creator_aliases(name);
         CREATE INDEX IF NOT EXISTS idx_creator_profiles_creator ON creator_profiles(creator_id);
@@ -198,7 +206,100 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO app_meta(key, value) VALUES('schema_version', ?)",
         (expected_version,),
     )
+    _seed_app_settings(conn)
     conn.commit()
+
+
+def _seed_app_settings(conn: sqlite3.Connection) -> None:
+    ts = now_iso()
+    existing_count = conn.execute("SELECT count(*) AS c FROM app_settings").fetchone()
+    if existing_count is None or int(existing_count["c"]) > 0:
+        return
+
+    defaults: dict[tuple[str, str], Any] = {
+        ("system", "gallery_dl_command"): None,
+        ("system", "metadata_worker_limit"): 5,
+        ("user", "theme"): "light",
+    }
+
+    legacy = load_legacy_config()
+    if isinstance(legacy, dict):
+        if "gallery_dl_command" in legacy:
+            defaults[("system", "gallery_dl_command")] = legacy.get("gallery_dl_command")
+        if "metadata_worker_limit" in legacy:
+            defaults[("system", "metadata_worker_limit")] = legacy.get("metadata_worker_limit")
+
+    for (scope, key), value in defaults.items():
+        conn.execute(
+            """
+            INSERT INTO app_settings(scope, key, value_json, updated_at)
+            VALUES(?, ?, ?, ?)
+            """,
+            (scope, key, _settings_value_json(value), ts),
+        )
+
+
+def get_app_setting(
+    conn: sqlite3.Connection,
+    scope: str,
+    key: str,
+    default: Any = None,
+) -> Any:
+    row = conn.execute(
+        "SELECT value_json FROM app_settings WHERE scope = ? AND key = ?",
+        (scope, key),
+    ).fetchone()
+    if row is None:
+        return default
+    return json_loads(row["value_json"], default)
+
+
+def set_app_setting(
+    conn: sqlite3.Connection,
+    scope: str,
+    key: str,
+    value: Any,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO app_settings(scope, key, value_json, updated_at)
+        VALUES(?, ?, ?, ?)
+        ON CONFLICT(scope, key) DO UPDATE SET
+            value_json = excluded.value_json,
+            updated_at = excluded.updated_at
+        """,
+        (scope, key, _settings_value_json(value), now_iso()),
+    )
+
+
+def list_app_settings(conn: sqlite3.Connection, scope: str | None = None) -> dict[str, dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT scope, key, value_json
+        FROM app_settings
+        WHERE (? IS NULL OR scope = ?)
+        ORDER BY scope, key
+        """,
+        (scope, scope),
+    ).fetchall()
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        scoped = result.setdefault(str(row["scope"]), {})
+        scoped[str(row["key"])] = json_loads(row["value_json"], None)
+    return result
+
+
+def read_app_setting(db_path: Path, scope: str, key: str, default: Any = None) -> Any:
+    conn = connect(db_path)
+    try:
+        return get_app_setting(conn, scope, key, default)
+    finally:
+        conn.close()
+
+
+def _settings_value_json(value: Any) -> str:
+    encoded = json_dumps(value)
+    return "null" if encoded is None else encoded
 
 
 def require_lastrowid(cur: sqlite3.Cursor) -> int:

@@ -7,7 +7,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -16,6 +15,7 @@ from PySide6.QtWidgets import (
 from core.constants import AmbiguousTarget, UserError
 from core.config import LOGGER
 from core.controller import Controller
+from ..notifications import NotificationPayload
 
 
 class WriteDialog(QDialog):
@@ -72,16 +72,48 @@ class WriteDialog(QDialog):
         """Hook for subclasses; default just accepts."""
         self.accept()
 
+    def success_text(self, result: dict[str, Any]) -> str:
+        return f"{self.title} completed."
+
+    def _notify(
+        self,
+        title: str,
+        text: str,
+        *,
+        level: str = "info",
+        detail: str | None = None,
+        sticky: bool = False,
+        timeout_ms: int = 4500,
+    ) -> None:
+        self._controller.pubsub.pub(
+            "message",
+            payload=NotificationPayload(
+                title=title,
+                text=text,
+                level=level,
+                detail=detail,
+                sticky=sticky,
+                timeout_ms=timeout_ms,
+            ),
+        )
+
     def _on_submit(self) -> None:
         try:
             result = self.invoke()
         except (UserError, AmbiguousTarget) as exc:
-            QMessageBox.warning(self, self.title, str(exc) or exc.__class__.__name__)
+            self._notify(self.title, str(exc) or exc.__class__.__name__, level="warning", sticky=True)
             return
         except Exception as exc:
             LOGGER.exception("Dialog %s failed: %s", self.title, exc)
-            QMessageBox.critical(self, self.title, f"Unexpected failure: {exc}")
+            self._notify(
+                self.title,
+                f"Unexpected failure: {exc}",
+                level="error",
+                detail=repr(exc),
+                sticky=True,
+            )
             return
         if isinstance(result, dict) and result.get("warning"):
-            QMessageBox.information(self, self.title, str(result["warning"]))
+            self._notify(self.title, str(result["warning"]), level="warning", sticky=True)
+        self._notify(self.title, self.success_text(result if isinstance(result, dict) else {}), level="success")
         self.accept_result(result if isinstance(result, dict) else {})
