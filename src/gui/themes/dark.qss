@@ -1,0 +1,59 @@
+/* clog dark theme.
+   Indicator colours taken from hydrus default_hydrus_dark.qss.
+   Structural rules added for the widgets clog actually uses. */
+
+QToolBar {
+    spacing: 4px;
+    padding: 2px;
+    border-bottom: 1px solid #1f2123;
+}
+
+QToolButton {
+    padding: 4px 8px;
+}
+
+QStatusBar {
+    border-top: 1px solid #1f2123;
+}
+
+QHeaderView::section {
+    background-color: #2e3236;
+    color: #dcdcdc;
+    padding: 4px;
+    border: 1px solid #1f2123;
+}
+
+QTableView {
+    alternate-background-color: #2a2d30;
+    gridline-color: #3c3f41;
+}
+
+QTableView::item:selected {
+    background-color: #3a78b8;
+    color: #ffffff;
+}
+
+QTabBar::tab:selected {
+    background: #3c3f41;
+}
+
+QSplitter::handle {
+    background: #1f2123;
+}
+
+QPlainTextEdit, QTextEdit {
+    font-family: "Cascadia Mono", "Consolas", "Courier New", monospace;
+}
+
+/* hydrus indicator colours (dark variants) */
+
+QLabel#HydrusValid       { color: #2ed42e; }
+QLabel#HydrusInvalid     { color: #ff7171; }
+QLabel#HydrusWarning,
+QCheckBox#HydrusWarning  { color: #ff7171; }
+
+QPushButton#HydrusAccept { color: #2ed42e; }
+QPushButton#HydrusCancel { color: #ff7171; }
+
+QLineEdit#HydrusValid,   QPlainTextEdit#HydrusValid,   QTextEdit#HydrusValid   { background-color: #80ff80; color: #000000; }
+QLineEdit#HydrusInvalid, QPlainTextEdit#HydrusInvalid, QTextEdit#HydrusInvalid { background-color: #ff8080; color: #000000; }

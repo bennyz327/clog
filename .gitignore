@@ -10,13 +10,16 @@ __pycache__/
 *.py[cod]
 *.pyo
 
-# Runtime data (generated at runtime, not source)
+# Runtime data (generated at runtime, not source — dev mode now puts these under db/)
+/db/
 clog.sqlite
 clog.sqlite-wal
 clog.sqlite-shm
 clog.log
+clog.json
 
 .idea
 
 # build
 clog.exe
+/docs/sample/

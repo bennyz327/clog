@@ -1,32 +1,15 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
 
-from .config import LOGGER, config_path, log_path, parse_global_options, write_default_config
-from .constants import AmbiguousTarget, UserError
-from .db import (
-    candidate_lines,
-    connect,
-    creator_label,
-    due_rows,
-    fetch_creator_snapshot,
-    fetch_post_detail_row,
-    fetch_work_detail_row,
-    grouped_search,
-    profile_brief,
-    recent_creators,
-    recent_posts,
-    recent_worklogs,
-    rebuild_search,
-    resolve_target,
-    search_rows,
-)
-from .render import format_kind_counts, render_creator_snapshot, render_post_detail, render_work_detail
-from .service import (
+from core.constants import UserError
+from core.config import config_path, write_default_config
+from core.enrichment import SubprocessDriver
+from core.render import render_creator_snapshot
+from core.service import (
     add_creator_record,
     add_name_record,
     add_post_record,
@@ -34,29 +17,39 @@ from .service import (
     add_work_record,
     set_reminder_record,
 )
-from .tui import launch_tui
-from .utils import json_loads, make_parser, parse_known, prompt_input, shorten
-from .worker import process_metadata_tasks
+from core.utils import make_parser, parse_known, shorten
+from db import (
+    creator_label,
+    due_rows,
+    fetch_creator_snapshot,
+    grouped_search,
+    rebuild_search,
+    recent_creators,
+    recent_posts,
+    recent_worklogs,
+    resolve_target,
+    search_rows,
+)
+from .printers import (
+    print_due,
+    print_grouped_search,
+    print_post_detail,
+    print_recent_creators,
+    print_recent_posts,
+    print_recent_summary,
+    print_recent_worklogs,
+    print_work_detail,
+)
+from .tty import prompt_input
 
 
-# ── print helpers ─────────────────────────────────────────────────────────────
+def _show_creator(conn: sqlite3.Connection, creator_id: int) -> None:
+    print(render_creator_snapshot(fetch_creator_snapshot(conn, creator_id)))
 
-def print_grouped_search(groups: list[dict[str, Any]]) -> None:
-    for index, group in enumerate(groups, start=1):
-        creator = group["creator"]
-        print(f"{index}. #{creator['id']} {creator['primary_name']} [{creator['status']}]")
-        matches = format_kind_counts(group["kind_counts"])
-        if matches:
-            print(f"   matches: {matches}")
-        if group["aliases"]:
-            print(f"   aliases: {', '.join(group['aliases'])}")
-        if group["profiles"]:
-            print(f"   profiles: {'; '.join(group['profiles'])}")
-        if group["urls"]:
-            url_text = "; ".join(shorten(url, 80) for url in group["urls"])
-            print(f"   urls: {url_text}")
-        if group["snippets"]:
-            print(f"   hits: {'; '.join(group['snippets'])}")
+
+def _maybe_kick_worker(result: dict[str, Any], db_path: Path) -> None:
+    if isinstance(result, dict) and result.get("needs_worker"):
+        SubprocessDriver.spawn(db_path)
 
 
 def show_search_selection(
@@ -79,133 +72,8 @@ def show_search_selection(
             raise UserError("selection is out of range")
         creator_id = int(groups[index - 1]["creator"]["id"])
     print("")
-    cmd_show(conn, db_path, [f"#{creator_id}"])
+    _show_creator(conn, creator_id)
 
-
-def print_due(conn: sqlite3.Connection, include_future: bool = False) -> None:
-    rows = due_rows(conn, include_future=include_future)
-    if not rows:
-        print("no due reminders")
-        return
-    for row in rows:
-        interval = f", every {row['interval_days']}d" if row["interval_days"] else ""
-        note = f" | {row['note']}" if row["note"] else ""
-        print(f"#{row['creator_id']} {row['primary_name']} due {row['next_due_at']}{interval}{note}")
-
-
-def print_recent_creators(rows: list[sqlite3.Row]) -> None:
-    if not rows:
-        print("  (none)")
-        return
-    for index, row in enumerate(rows, start=1):
-        print(
-            f"  {index}. #{row['id']} {row['primary_name']} [{row['status']}] "
-            f"updated={row['updated_at']} profiles={row['profile_count']} urls={row['url_count']} "
-            f"posts={row['post_count']} work={row['work_count']}"
-        )
-
-
-def print_recent_posts(rows: list[sqlite3.Row]) -> None:
-    if not rows:
-        print("  (none)")
-        return
-    for index, row in enumerate(rows, start=1):
-        title = row["title"] or row["url"]
-        profile = profile_brief(row["platform"], row["platform_id"], row["display_name"])
-        print(
-            f"  {index}. post:{row['id']} #{row['creator_id']} {row['primary_name']} "
-            f"[{profile}] {shorten(title, 90)} captured={row['captured_at']}"
-        )
-
-
-def print_recent_worklogs(rows: list[sqlite3.Row]) -> None:
-    if not rows:
-        print("  (none)")
-        return
-    for index, row in enumerate(rows, start=1):
-        print(
-            f"  {index}. work:{row['id']} #{row['creator_id']} {row['primary_name']} "
-            f"{shorten(row['content'], 90)} at={row['created_at']}"
-        )
-
-
-def print_recent_summary(conn: sqlite3.Connection, limit: int) -> None:
-    print("recent creators:")
-    print_recent_creators(recent_creators(conn, limit))
-    print("")
-    print("recent posts:")
-    print_recent_posts(recent_posts(conn, limit))
-    print("")
-    print("recent work:")
-    print_recent_worklogs(recent_worklogs(conn, limit))
-
-
-def print_json_detail(label: str, text: str | None, limit: int = 5000) -> None:
-    value = json_loads(text, None)
-    if value is None:
-        return
-    rendered = json.dumps(value, ensure_ascii=False, indent=2)
-    print(f"{label}:")
-    print(shorten(rendered, limit))
-
-
-def print_post_detail(conn: sqlite3.Connection, post_id: int) -> None:
-    print(render_post_detail(fetch_post_detail_row(conn, post_id)))
-
-
-def print_work_detail(conn: sqlite3.Connection, work_id: int) -> None:
-    print(render_work_detail(fetch_work_detail_row(conn, work_id)))
-
-
-def print_table_rows(rows: list[sqlite3.Row], columns: list[str]) -> None:
-    if not rows:
-        print("  (none)")
-        return
-    for row in rows:
-        parts = []
-        for col in columns:
-            value = row[col]
-            if value not in (None, ""):
-                parts.append(f"{col}={shorten(value, 80)}")
-        print("  " + " | ".join(parts))
-
-
-def print_help() -> None:
-    print(
-        """clog - creator-centric local tracker
-
-Usage:
-  clog                  launch interactive mode
-  clog [--db PATH] COMMAND ...
-  clog QUERY
-
-Commands:
-  i, init             initialize config and database
-  a, add NAME [URL]   add creator
-  n, name TARGET NAME [CONTEXT]
-                      add generic alias, rename an existing profile, or add via creator URL
-  u, url TARGET URL   attach creator URL to a profile
-  p, post URL [TARGET]
-                      record post only when metadata matches an existing profile
-  r, remind TARGET WHEN
-                      set reminder; WHEN = YYYY-MM-DD, today, tomorrow, Nd
-  d, due              show due reminders
-  ls, l               recent creators/posts/work with interactive browser
-  c, work TARGET CONTENT
-                      add creator-level work log content
-  s, search QUERY     grouped global search (-i choose, -v show if unique, --raw debug)
-  v, show TARGET      show creator main record
-
-Target forms:
-  #12
-  https://platform/profile
-  platform:platform_id
-  exact or fuzzy name if it resolves to exactly one creator
-"""
-    )
-
-
-# ── interactive browse ────────────────────────────────────────────────────────
 
 def browse_recent_list(
     conn: sqlite3.Connection,
@@ -258,7 +126,7 @@ def browse_recent_list(
         row = page_rows[index - 1]
         print("")
         if kind == "creators":
-            cmd_show(conn, db_path, [f"#{row['id']}"])
+            _show_creator(conn, int(row["id"]))
         elif kind == "posts":
             print_post_detail(conn, int(row["id"]))
         else:
@@ -286,8 +154,6 @@ def interactive_ls(conn: sqlite3.Connection, db_path: Path, page_size: int) -> N
             print("invalid choice")
 
 
-# ── CLI commands ──────────────────────────────────────────────────────────────
-
 def cmd_init(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
     parser = make_parser("clog init")
     parse_known(parser, args)
@@ -308,6 +174,7 @@ def cmd_add(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
         conn, db_path, ns.name,
         url=ns.url, note=ns.note,
     )
+    _maybe_kick_worker(result, db_path)
     if result.get("warning"):
         print(f"warning: {result['warning']}")
     print(f"added {creator_label(conn, result['creator_id'])}")
@@ -323,6 +190,7 @@ def cmd_name(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
         conn, db_path, ns.target, ns.name,
         context=ns.context,
     )
+    _maybe_kick_worker(result, db_path)
     if result.get("warning"):
         print(f"warning: {result['warning']}")
     print(f"added alias #{result['alias_id']} to {creator_label(conn, result['creator_id'])}")
@@ -338,6 +206,7 @@ def cmd_url(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
         conn, db_path, ns.target, ns.url,
         note=ns.note,
     )
+    _maybe_kick_worker(result, db_path)
     if result.get("warning"):
         print(f"warning: {result['warning']}")
     print(f"attached url #{result['url_id']} to {creator_label(conn, result['creator_id'])}")
@@ -354,6 +223,7 @@ def cmd_post(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
         conn, db_path, ns.url,
         target=ns.target, note=ns.note, timeout=ns.timeout,
     )
+    _maybe_kick_worker(result, db_path)
     if result.get("warning"):
         print(f"warning: {result['warning']}")
     print(f"recorded post #{result['post_id']} for {creator_label(conn, result['creator_id'])}")
@@ -444,7 +314,7 @@ def cmd_search(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None
         if len(groups) != 1:
             raise UserError("`-v/--view` requires exactly one matched main record")
         print("")
-        cmd_show(conn, db_path, [f"#{groups[0]['creator']['id']}"])
+        _show_creator(conn, int(groups[0]["creator"]["id"]))
     elif interactive:
         show_search_selection(conn, db_path, groups)
     else:
@@ -456,7 +326,7 @@ def cmd_show(conn: sqlite3.Connection, _db_path: Path, args: list[str]) -> None:
     parser.add_argument("target")
     ns = parse_known(parser, args)
     creator_id = resolve_target(conn, ns.target)
-    print(render_creator_snapshot(fetch_creator_snapshot(conn, creator_id)))
+    _show_creator(conn, creator_id)
 
 
 def cmd_home(conn: sqlite3.Connection) -> None:
@@ -481,110 +351,3 @@ def cmd_home(conn: sqlite3.Connection) -> None:
     print("  clog ls                        recent lists + interactive browser")
     print("  clog s QUERY / clog QUERY      global search")
     print("  clog v TARGET                  show creator")
-
-
-# ── dispatch ──────────────────────────────────────────────────────────────────
-
-CommandHandler = Any
-
-COMMANDS: dict[str, tuple[str, CommandHandler]] = {
-    "init": ("init", cmd_init),
-    "i": ("init", cmd_init),
-    "add": ("add", cmd_add),
-    "a": ("add", cmd_add),
-    "name": ("name", cmd_name),
-    "n": ("name", cmd_name),
-    "url": ("url", cmd_url),
-    "u": ("url", cmd_url),
-    "post": ("post", cmd_post),
-    "p": ("post", cmd_post),
-    "remind": ("remind", cmd_remind),
-    "r": ("remind", cmd_remind),
-    "due": ("due", cmd_due),
-    "d": ("due", cmd_due),
-    "ls": ("ls", cmd_ls),
-    "l": ("ls", cmd_ls),
-    "work": ("work", cmd_work),
-    "c": ("work", cmd_work),
-    "search": ("search", cmd_search),
-    "s": ("search", cmd_search),
-    "show": ("show", cmd_show),
-    "v": ("show", cmd_show),
-}
-
-
-def dispatch(db_path: Path, _quiet: bool, argv: list[str]) -> int:
-    LOGGER.info("Dispatch db=%s argv=%s", db_path, argv)
-    if argv and argv[0] == "__meta_worker":
-        parser = make_parser("clog __meta_worker")
-        parser.add_argument("--limit", type=int, default=5)
-        ns = parse_known(parser, argv[1:])
-        process_metadata_tasks(db_path, ns.limit)
-        return 0
-
-    if argv and argv[0] in ("-h", "--help", "help"):
-        print_help()
-        return 0
-    if not argv:
-        return launch_tui(db_path)
-    if len(argv) >= 2 and argv[1] in ("-h", "--help") and argv[0] in COMMANDS:
-        canonical, handler = COMMANDS[argv[0]]
-        if canonical == "search":
-            print_help()
-            return 0
-        handler(None, db_path, argv[1:])
-        return 0
-
-    conn = connect(db_path)
-    try:
-        name = argv[0]
-        if name not in COMMANDS:
-            cmd_search(conn, db_path, argv)
-            return 0
-        _, handler = COMMANDS[name]
-        handler(conn, db_path, argv[1:])
-        return 0
-    finally:
-        try:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except Exception as exc:
-            LOGGER.warning("CLI DB checkpoint failed: %s", exc)
-        conn.close()
-        LOGGER.info("CLI DB closed %s", db_path)
-
-
-def main(argv: list[str] | None = None) -> int:
-    effective_argv = list(sys.argv[1:] if argv is None else argv)
-    try:
-        db_path, quiet, rest = parse_global_options(effective_argv)
-        return dispatch(db_path, quiet, rest)
-    except AmbiguousTarget as exc:
-        LOGGER.warning("Ambiguous target: %s", exc.target)
-        try:
-            db_path, _, _ = parse_global_options(effective_argv)
-            conn = connect(db_path)
-            try:
-                print(f"ambiguous target: {exc.target}", file=sys.stderr)
-                print("use #id, URL, or platform:platform_id:", file=sys.stderr)
-                for line in candidate_lines(conn, exc.creator_ids):
-                    print(line, file=sys.stderr)
-            finally:
-                conn.close()
-        except Exception:
-            print(str(exc), file=sys.stderr)
-        return 2
-    except UserError as exc:
-        LOGGER.warning("User error: %s", exc)
-        message = str(exc)
-        if message:
-            print(f"error: {message}", file=sys.stderr)
-        return 2
-    except KeyboardInterrupt:
-        LOGGER.info("Interrupted by user")
-        print("interrupted", file=sys.stderr)
-        return 130
-    except Exception as exc:
-        from .config import log_exception
-        log_exception("Fatal error", exc)
-        print(f"error: unexpected failure, see {log_path().name}", file=sys.stderr)
-        return 1

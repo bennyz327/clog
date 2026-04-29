@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 APP = "clog"
+DB_DIR_NAME = "db"
 DB_NAME = "clog.sqlite"
 CONFIG_NAME = "clog.json"
 LOG_NAME = "clog.log"

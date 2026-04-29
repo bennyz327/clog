@@ -5,9 +5,9 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from .config import LOGGER
-from .constants import AmbiguousTarget, ConflictError, SCHEMA_VERSION, UserError
-from .utils import (
+from core.config import LOGGER
+from core.constants import AmbiguousTarget, ConflictError, SCHEMA_VERSION, UserError
+from core.utils import (
     canonical_url,
     infer_platform_from_url,
     is_url,

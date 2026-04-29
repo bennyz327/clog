@@ -4,7 +4,7 @@ import json
 import sqlite3
 from typing import Any
 
-from .db import profile_brief
+from db import profile_brief
 from .utils import json_loads, shorten
 
 

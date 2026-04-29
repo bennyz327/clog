@@ -33,17 +33,20 @@
 
 ## 執行模式
 
-- `clog`：啟動 TUI
-- `clog ...`：走 CLI
+打包後產出兩支 exe：
 
-範例：
+- `clog.exe`：原生 GUI（PySide6）。雙擊啟動。
+- `clog-cli.exe`：純 CLI / 自動化腳本用。
+
+兩支共用同一個 `clog.json` 與 `clog.sqlite`（依 `clog.json` 的 `db_path` 決定）；GUI 跑背景 enrichment 時會自動 spawn 同目錄的 `clog-cli.exe __meta_worker`，不會把 GUI 自己當 worker。
+
+範例 CLI 用法：
 
 ```bash
-clog
-clog a "creator name" https://x.com/example
-clog n #1 "old alias"
-clog u #1 https://www.pixiv.net/users/123456
-clog p https://x.com/example/status/123
+clog-cli a "creator name" https://x.com/example
+clog-cli n #1 "old alias"
+clog-cli u #1 https://www.pixiv.net/users/123456
+clog-cli p https://x.com/example/status/123
 ```
 
 ## 常用命令
@@ -97,13 +100,6 @@ clog n TARGET NAME https://site.example/creator-page
   - 走 `add url` 的 profile attach pipeline
   - 成功後把 alias 綁到該 profile
 
-TUI 形式：
-
-- 只能在目前選中的 creator 上操作
-- 使用者先輸入名稱
-- 再從「Generic Alias / 既有 profile / Via Author URL」三種路徑中選一條
-- 不提供自由輸入 platform / pid 欄位
-
 ## `add url`
 
 CLI 形式：
@@ -141,34 +137,12 @@ clog p URL [TARGET] [--note TEXT]
 - `TARGET` 只拿來驗證命中的 profile 是否屬於該 creator，不能作 fallback
 - `add post` 不會補建或更新 profile / profile_url / alias
 
-## TUI
-
-TUI 目前已配合 profile-centric schema 更新：
-
-- creator detail 會顯示 aliases、profiles、profile URLs、recent posts、recent work
-- `Add Name` 改成兩段式流程
-- `Add URL` 只保留 URL 與 note
-- `Record Post` 不再提供「只靠 TARGET 強掛 creator」的舊語意
-- 搜尋、recent tables、detail panel 都以 `profile` 為主要外部身份顯示單位
-
 ## Worklogs
 
 - `worklogs` 只綁 `creator_id`
 - 內容只存單一 `content` 欄位
 - `content` 保存 raw markdown source，現在先當純文字顯示
-- CLI/TUI 不再提供 tags / paths / urls / metadata JSON 的獨立輸入欄位
-
-快捷鍵：
-
-- `/`：回到搜尋框
-- `Ctrl+A`：新增 creator
-- `Ctrl+N`：新增名稱
-- `Ctrl+U`：新增作者頁 URL
-- `Ctrl+P`：記錄貼文
-- `Ctrl+R`：設定提醒
-- `Ctrl+W`：新增工作紀錄
-- `[` / `]`：切換 recent list 頁數
-- `F5`：重新整理
+- CLI 不再提供 tags / paths / urls / metadata JSON 的獨立輸入欄位
 
 ## 搜尋
 
@@ -207,17 +181,38 @@ TUI 目前已配合 profile-centric schema 更新：
 ## 原始碼執行
 
 ```bash
-python clog.py init
-python clog.py a example https://x.com/example
-python clog.py
+# CLI 開發入口
+python clog_cli.py init
+python clog_cli.py a example https://x.com/example
+
+# GUI 開發入口
+python clog_gui.py
 ```
 
-主要原始碼位於 `src/`：
+打包：
 
-- `db.py`：schema 與查詢
-- `service.py`：命令業務邏輯
-- `gallery.py`：gallery-dl 整合
-- `worker.py`：profile enrichment worker
-- `render.py`：detail rendering
-- `cli.py`：CLI dispatch
-- `tui.py`：Textual TUI
+```bash
+pyinstaller clog_cli.spec     # → dist/clog-cli.exe（onefile, 純 CLI 無 PySide6, ~16 MB）
+pyinstaller clog.spec         # → dist/clog/clog.exe + dist/clog/_internal/（onedir, GUI 含 PySide6）
+```
+
+GUI 採 **onedir** 而非 onefile，原因是 onefile 每次啟動都要把 ~250 MB 解壓到 `%TEMP%`，實測啟動約 18–20 秒；onedir 直接讀檔，啟動降到 0.6 秒。發布時整個 `dist/clog/` 資料夾要一起送給使用者。
+
+主要原始碼位於 `src/`，套件結構：
+
+```
+src/
+├── core/          # 共用業務邏輯（CLI + GUI 都用）
+│   ├── constants.py
+│   ├── config.py / utils.py / render.py / gallery.py / service.py
+│   ├── enrichment.py    # profile metadata 補全：CLI 走 SubprocessDriver、GUI 走 InProcessRunner
+│   ├── pubsub.py / jobs.py
+│   └── controller.py    # GUI 用單例：read/write dispatch + DB lock + pubsub + JobPool
+├── db/            # SQLite schema + 全部 query function（單檔，re-export）
+├── cli/           # CLI 介面層
+│   ├── main.py / dispatch.py / commands.py / printers.py / tty.py
+└── gui/           # PySide6 介面層
+    ├── app.py / main_window.py / pubsub_bridge.py
+    ├── themes/{light,dark}.qss
+    └── dialogs/{add_creator,add_name,add_url,add_post,add_work,set_reminder}.py
+```
