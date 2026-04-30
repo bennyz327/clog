@@ -1,0 +1,33 @@
+app.ico
+  format: .ico
+  sizes: 16,24,32,48,64,128,256
+  background: transparent
+  source: main icon after background removal
+  usage: Windows exe / shortcut / file explorer
+
+app.png
+  format: .png
+  size: 1024x1024
+  background: transparent
+  source: main icon after background removal
+  usage: README / about / fallback
+
+app-dark.svg
+  format: .svg
+  viewBox: 0 0 256 256
+  background: transparent
+  style: simplified dark/main-color icon
+  usage: light theme GUI inline icon
+
+app-light.svg
+  format: .svg
+  viewBox: 0 0 256 256
+  background: transparent
+  style: simplified white icon
+  usage: dark theme GUI inline icon
+
+splash.png
+  format: .png
+  size: 1024x1024
+  background: transparent
+  usage: startup splash
