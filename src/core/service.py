@@ -7,10 +7,18 @@ from typing import Any
 from .constants import ConflictError, UserError
 from db import (
     creator_label,
+    delete_alias_row,
+    delete_post_row,
     delete_profile_if_orphaned,
+    delete_profile_url_row,
+    delete_post_meta_history_row,
+    delete_reminder_row,
+    delete_worklog_row,
+    fetch_post_detail_row,
     insert_alias,
     insert_creator,
     insert_or_update_post,
+    insert_post_meta_history,
     insert_profile,
     insert_profile_url,
     profile_brief,
@@ -18,16 +26,22 @@ from db import (
     profile_row_by_identity,
     profile_rows_by_creator_platform,
     profile_url_row_by_canonical,
+    replace_post_metadata,
     require_lastrowid,
     resolve_target,
     sync_creator_search,
     touch_creator,
+    update_alias_fields,
+    update_post_fields,
     update_profile,
     update_profile_url,
+    update_profile_url_fields,
+    update_reminder_fields,
+    update_worklog_content,
     upsert_profile_job,
 )
 from .gallery import classify_url_kind, extract_metadata, run_gallery_metadata
-from .utils import canonical_url, infer_platform_from_url, is_url, now_iso
+from .utils import canonical_url, infer_platform_from_url, is_url, json_dumps, now_iso, parse_when
 
 
 def _profile_lookup_message(platform: str | None, platform_id: str | None) -> str:
@@ -382,8 +396,6 @@ def set_reminder_record(
     interval_days: int | None = None,
     note: str | None = None,
 ) -> dict[str, Any]:
-    from .utils import parse_when
-
     creator_id = resolve_target(conn, target)
     due_at, interval_from_when = parse_when(when)
     interval = interval_days if interval_days is not None else interval_from_when
@@ -445,6 +457,209 @@ def add_work_record(
     return {"creator_id": creator_id, "work_id": require_lastrowid(cur)}
 
 
+# ── update / delete records ───────────────────────────────────────────────
+def update_url_record(
+    conn: sqlite3.Connection,
+    _db_path: Path,
+    url_id: int,
+    *,
+    url: str | None = None,
+    note: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    with conn:
+        creator_id = update_profile_url_fields(
+            conn, url_id, url=url, note=note, status=status
+        )
+        touch_creator(conn, creator_id)
+        sync_creator_search(conn, creator_id)
+    return {"creator_id": creator_id, "url_id": url_id}
+
+
+def delete_url_record(
+    conn: sqlite3.Connection,
+    _db_path: Path,
+    url_id: int,
+) -> dict[str, Any]:
+    with conn:
+        creator_id = delete_profile_url_row(conn, url_id)
+        touch_creator(conn, creator_id)
+        sync_creator_search(conn, creator_id)
+    return {"creator_id": creator_id, "url_id": url_id}
+
+
+def update_alias_record(
+    conn: sqlite3.Connection,
+    _db_path: Path,
+    alias_id: int,
+    *,
+    name: str,
+    reason: str | None = None,
+    note: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    with conn:
+        creator_id = update_alias_fields(
+            conn, alias_id, name=name, reason=reason, note=note, status=status
+        )
+        touch_creator(conn, creator_id)
+        sync_creator_search(conn, creator_id)
+    return {"creator_id": creator_id, "alias_id": alias_id}
+
+
+def delete_alias_record(
+    conn: sqlite3.Connection,
+    _db_path: Path,
+    alias_id: int,
+) -> dict[str, Any]:
+    with conn:
+        creator_id = delete_alias_row(conn, alias_id)
+        touch_creator(conn, creator_id)
+        sync_creator_search(conn, creator_id)
+    return {"creator_id": creator_id, "alias_id": alias_id}
+
+
+def update_post_record(
+    conn: sqlite3.Connection,
+    _db_path: Path,
+    post_id: int,
+    *,
+    url: str | None = None,
+    note: str | None = None,
+    title: str | None = None,
+) -> dict[str, Any]:
+    with conn:
+        creator_id = update_post_fields(
+            conn, post_id, url=url, note=note, title=title
+        )
+        touch_creator(conn, creator_id)
+        sync_creator_search(conn, creator_id)
+    return {"creator_id": creator_id, "post_id": post_id}
+
+
+def delete_post_record(
+    conn: sqlite3.Connection,
+    _db_path: Path,
+    post_id: int,
+) -> dict[str, Any]:
+    with conn:
+        creator_id = delete_post_row(conn, post_id)
+        touch_creator(conn, creator_id)
+        sync_creator_search(conn, creator_id)
+    return {"creator_id": creator_id, "post_id": post_id}
+
+
+def update_work_record(
+    conn: sqlite3.Connection,
+    _db_path: Path,
+    work_id: int,
+    *,
+    content: str,
+) -> dict[str, Any]:
+    with conn:
+        creator_id = update_worklog_content(conn, work_id, content)
+        touch_creator(conn, creator_id)
+        sync_creator_search(conn, creator_id)
+    return {"creator_id": creator_id, "work_id": work_id}
+
+
+def delete_work_record(
+    conn: sqlite3.Connection,
+    _db_path: Path,
+    work_id: int,
+) -> dict[str, Any]:
+    with conn:
+        creator_id = delete_worklog_row(conn, work_id)
+        touch_creator(conn, creator_id)
+        sync_creator_search(conn, creator_id)
+    return {"creator_id": creator_id, "work_id": work_id}
+
+
+def update_reminder_record(
+    conn: sqlite3.Connection,
+    _db_path: Path,
+    creator_id: int,
+    when: str,
+    *,
+    interval_days: int | None = None,
+    note: str | None = None,
+) -> dict[str, Any]:
+    due_at, interval_from_when = parse_when(when)
+    interval = interval_days if interval_days is not None else interval_from_when
+    with conn:
+        update_reminder_fields(
+            conn,
+            creator_id,
+            next_due_at=due_at,
+            interval_days=interval,
+            note=note,
+        )
+        touch_creator(conn, creator_id)
+        sync_creator_search(conn, creator_id)
+    return {"creator_id": creator_id, "due_at": due_at}
+
+
+def delete_reminder_record(
+    conn: sqlite3.Connection,
+    _db_path: Path,
+    creator_id: int,
+) -> dict[str, Any]:
+    with conn:
+        existed = delete_reminder_row(conn, creator_id)
+        if existed:
+            touch_creator(conn, creator_id)
+            sync_creator_search(conn, creator_id)
+    return {"creator_id": creator_id, "removed": existed}
+
+
+def refetch_post_meta_record(
+    conn: sqlite3.Connection,
+    _db_path: Path,
+    post_id: int,
+    *,
+    timeout: int = 60,
+) -> dict[str, Any]:
+    """Re-run gdl on the post URL, append meta to history, refresh posts.metadata_json."""
+    post = fetch_post_detail_row(conn, post_id)
+    url = post["url"]
+    metadata, error = run_gallery_metadata(url, timeout=timeout)
+    if error:
+        raise UserError(error)
+    if not metadata:
+        raise UserError("gallery-dl returned no metadata")
+    raw_json = json_dumps(metadata)
+    if raw_json is None:
+        raise UserError("metadata could not be encoded as JSON")
+    creator_id = int(post["creator_id"])
+    with conn:
+        history_id = insert_post_meta_history(conn, post_id, raw_json, source="gdl")
+        replace_post_metadata(conn, post_id, raw_json)
+        touch_creator(conn, creator_id)
+    return {
+        "creator_id": creator_id,
+        "post_id": post_id,
+        "history_id": history_id,
+    }
+
+
+def delete_post_meta_history_record(
+    conn: sqlite3.Connection,
+    _db_path: Path,
+    history_id: int,
+) -> dict[str, Any]:
+    """Remove a single history entry. Does not touch posts.metadata_json."""
+    row = conn.execute(
+        "SELECT post_id FROM post_meta_history WHERE id = ?",
+        (history_id,),
+    ).fetchone()
+    if row is None:
+        raise UserError(f"Post meta history not found: {history_id}")
+    post_id = int(row["post_id"])
+    with conn:
+        delete_post_meta_history_row(conn, history_id)
+    return {"history_id": history_id, "post_id": post_id}
+
+
 __all__ = [
     "add_creator_record",
     "add_name_record",
@@ -452,5 +667,17 @@ __all__ = [
     "add_url_record",
     "add_work_record",
     "attach_profile_url",
+    "delete_alias_record",
+    "delete_post_meta_history_record",
+    "delete_post_record",
+    "delete_reminder_record",
+    "delete_url_record",
+    "delete_work_record",
+    "refetch_post_meta_record",
     "set_reminder_record",
+    "update_alias_record",
+    "update_post_record",
+    "update_reminder_record",
+    "update_url_record",
+    "update_work_record",
 ]

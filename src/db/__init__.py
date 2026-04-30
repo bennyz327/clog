@@ -173,6 +173,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS post_meta_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+            captured_at TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'gdl',
+            raw_json TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS app_settings (
             scope TEXT NOT NULL,
             key TEXT NOT NULL,
@@ -191,6 +199,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(next_due_at);
         CREATE INDEX IF NOT EXISTS idx_worklogs_creator ON worklogs(creator_id);
         CREATE INDEX IF NOT EXISTS idx_profile_jobs_status ON profile_enrichment_jobs(status, attempts);
+        CREATE INDEX IF NOT EXISTS idx_post_meta_history_post ON post_meta_history(post_id, captured_at DESC);
 
         CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
             kind UNINDEXED,
@@ -1528,3 +1537,395 @@ def recent_worklogs(conn: sqlite3.Connection, limit: int, offset: int = 0) -> li
         """,
         (limit, offset),
     ).fetchall()
+
+
+# ── per-creator maintenance reads ──────────────────────────────────────────
+def list_creator_urls(conn: sqlite3.Connection, creator_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT u.id           AS url_id,
+               u.url,
+               u.canonical_url,
+               u.from_url,
+               u.reason,
+               u.status,
+               u.note,
+               u.created_at,
+               u.updated_at,
+               p.id           AS profile_id,
+               p.platform,
+               p.platform_id,
+               p.display_name,
+               p.identity_state
+        FROM profile_urls u
+        JOIN creator_profiles p ON p.id = u.profile_id
+        WHERE p.creator_id = ?
+        ORDER BY p.platform, u.updated_at DESC, u.id DESC
+        """,
+        (creator_id,),
+    ).fetchall()
+
+
+def list_creator_aliases(conn: sqlite3.Connection, creator_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT a.id,
+               a.creator_id,
+               a.profile_id,
+               a.name,
+               a.reason,
+               a.status,
+               a.note,
+               a.from_name,
+               a.created_at,
+               a.updated_at,
+               p.platform,
+               p.platform_id,
+               p.display_name
+        FROM creator_aliases a
+        LEFT JOIN creator_profiles p ON p.id = a.profile_id
+        WHERE a.creator_id = ?
+        ORDER BY a.updated_at DESC, a.id DESC
+        """,
+        (creator_id,),
+    ).fetchall()
+
+
+def list_creator_posts(conn: sqlite3.Connection, creator_id: int, limit: int = 200) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT p.*,
+               cp.platform,
+               cp.platform_id,
+               cp.display_name
+        FROM posts p
+        JOIN creator_profiles cp ON cp.id = p.profile_id
+        WHERE p.creator_id = ?
+        ORDER BY p.posted_at DESC, p.captured_at DESC, p.id DESC
+        LIMIT ?
+        """,
+        (creator_id, limit),
+    ).fetchall()
+
+
+def get_creator_reminder(conn: sqlite3.Connection, creator_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT id, creator_id, next_due_at, interval_days, note,
+               last_shown_at, created_at, updated_at
+        FROM reminders
+        WHERE creator_id = ?
+        """,
+        (creator_id,),
+    ).fetchone()
+
+
+def list_creator_worklogs(conn: sqlite3.Connection, creator_id: int, limit: int = 200) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT id, creator_id, content, created_at, updated_at
+        FROM worklogs
+        WHERE creator_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+        """,
+        (creator_id, limit),
+    ).fetchall()
+
+
+# ── post meta history ──────────────────────────────────────────────────────
+def list_post_meta_history(conn: sqlite3.Connection, post_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT id, post_id, captured_at, source, raw_json
+        FROM post_meta_history
+        WHERE post_id = ?
+        ORDER BY captured_at DESC, id DESC
+        """,
+        (post_id,),
+    ).fetchall()
+
+
+def fetch_post_meta_history_row(conn: sqlite3.Connection, history_id: int) -> sqlite3.Row:
+    row = conn.execute(
+        """
+        SELECT id, post_id, captured_at, source, raw_json
+        FROM post_meta_history
+        WHERE id = ?
+        """,
+        (history_id,),
+    ).fetchone()
+    if row is None:
+        raise UserError(f"Post meta history not found: {history_id}")
+    return row
+
+
+def insert_post_meta_history(
+    conn: sqlite3.Connection,
+    post_id: int,
+    raw_json: str,
+    *,
+    source: str = "gdl",
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO post_meta_history(post_id, captured_at, source, raw_json)
+        VALUES(?, ?, ?, ?)
+        """,
+        (post_id, now_iso(), source, raw_json),
+    )
+    return require_lastrowid(cur)
+
+
+def delete_post_meta_history_row(conn: sqlite3.Connection, history_id: int) -> None:
+    cur = conn.execute("DELETE FROM post_meta_history WHERE id = ?", (history_id,))
+    if cur.rowcount == 0:
+        raise UserError(f"Post meta history not found: {history_id}")
+
+
+# ── url / alias / post / worklog / reminder mutations ─────────────────────
+def _get_profile_url_creator(conn: sqlite3.Connection, url_id: int) -> int:
+    row = conn.execute(
+        """
+        SELECT p.creator_id
+        FROM profile_urls u
+        JOIN creator_profiles p ON p.id = u.profile_id
+        WHERE u.id = ?
+        """,
+        (url_id,),
+    ).fetchone()
+    if row is None:
+        raise UserError(f"Profile URL not found: {url_id}")
+    return int(row["creator_id"])
+
+
+def update_profile_url_fields(
+    conn: sqlite3.Connection,
+    url_id: int,
+    *,
+    url: str | None = None,
+    note: str | None = None,
+    status: str | None = None,
+) -> int:
+    """Update the URL row's user-editable fields. Returns owning creator_id.
+
+    Recanonicalises ``url`` when supplied. ``note`` and ``status`` use direct
+    overwrite semantics — the caller is expected to preserve prior values
+    when omitted, since most callers come from edit forms with the full
+    current state.
+    """
+    creator_id = _get_profile_url_creator(conn, url_id)
+    ts = now_iso()
+    if url is not None:
+        canon = canonical_url(url)
+        if not canon:
+            raise UserError(f"Invalid URL: {url}")
+        existing = conn.execute(
+            "SELECT id FROM profile_urls WHERE canonical_url = ? AND id != ?",
+            (canon, url_id),
+        ).fetchone()
+        if existing is not None:
+            raise ConflictError(f"URL is already linked to another profile: {url}")
+        conn.execute(
+            "UPDATE profile_urls SET url = ?, canonical_url = ?, updated_at = ? WHERE id = ?",
+            (url, canon, ts, url_id),
+        )
+    conn.execute(
+        """
+        UPDATE profile_urls
+        SET note = ?,
+            status = coalesce(?, status),
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (note, status, ts, url_id),
+    )
+    return creator_id
+
+
+def delete_profile_url_row(conn: sqlite3.Connection, url_id: int) -> int:
+    """Delete a URL row; orphan profile/cleanup on best-effort. Returns creator_id."""
+    creator_id = _get_profile_url_creator(conn, url_id)
+    profile_id_row = conn.execute(
+        "SELECT profile_id FROM profile_urls WHERE id = ?",
+        (url_id,),
+    ).fetchone()
+    if profile_id_row is None:
+        raise UserError(f"Profile URL not found: {url_id}")
+    profile_id = int(profile_id_row["profile_id"])
+    conn.execute("DELETE FROM profile_urls WHERE id = ?", (url_id,))
+    delete_profile_if_orphaned(conn, profile_id)
+    return creator_id
+
+
+def update_alias_fields(
+    conn: sqlite3.Connection,
+    alias_id: int,
+    *,
+    name: str,
+    reason: str | None = None,
+    note: str | None = None,
+    status: str | None = None,
+) -> int:
+    row = conn.execute(
+        "SELECT creator_id FROM creator_aliases WHERE id = ?",
+        (alias_id,),
+    ).fetchone()
+    if row is None:
+        raise UserError(f"Alias not found: {alias_id}")
+    creator_id = int(row["creator_id"])
+    if not name.strip():
+        raise UserError("name is required")
+    ts = now_iso()
+    conn.execute(
+        """
+        UPDATE creator_aliases
+        SET name = ?,
+            reason = coalesce(?, reason),
+            status = coalesce(?, status),
+            note = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (name.strip(), reason, status, note, ts, alias_id),
+    )
+    return creator_id
+
+
+def delete_alias_row(conn: sqlite3.Connection, alias_id: int) -> int:
+    row = conn.execute(
+        "SELECT creator_id FROM creator_aliases WHERE id = ?",
+        (alias_id,),
+    ).fetchone()
+    if row is None:
+        raise UserError(f"Alias not found: {alias_id}")
+    creator_id = int(row["creator_id"])
+    conn.execute("DELETE FROM creator_aliases WHERE id = ?", (alias_id,))
+    return creator_id
+
+
+def update_post_fields(
+    conn: sqlite3.Connection,
+    post_id: int,
+    *,
+    url: str | None = None,
+    note: str | None = None,
+    title: str | None = None,
+) -> int:
+    row = conn.execute(
+        "SELECT creator_id FROM posts WHERE id = ?",
+        (post_id,),
+    ).fetchone()
+    if row is None:
+        raise UserError(f"Post not found: {post_id}")
+    creator_id = int(row["creator_id"])
+    ts = now_iso()
+    if url is not None:
+        canon = canonical_url(url)
+        if not canon:
+            raise UserError(f"Invalid URL: {url}")
+        existing = conn.execute(
+            "SELECT id, creator_id FROM posts WHERE canonical_url = ? AND id != ?",
+            (canon, post_id),
+        ).fetchone()
+        if existing is not None:
+            raise ConflictError(
+                f"Post URL is already linked to {creator_label(conn, int(existing['creator_id']))}: {url}"
+            )
+        conn.execute(
+            "UPDATE posts SET url = ?, canonical_url = ?, updated_at = ? WHERE id = ?",
+            (url, canon, ts, post_id),
+        )
+    conn.execute(
+        """
+        UPDATE posts
+        SET note = ?,
+            title = coalesce(?, title),
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (note, title, ts, post_id),
+    )
+    return creator_id
+
+
+def delete_post_row(conn: sqlite3.Connection, post_id: int) -> int:
+    row = conn.execute(
+        "SELECT creator_id FROM posts WHERE id = ?",
+        (post_id,),
+    ).fetchone()
+    if row is None:
+        raise UserError(f"Post not found: {post_id}")
+    creator_id = int(row["creator_id"])
+    conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+    return creator_id
+
+
+def replace_post_metadata(conn: sqlite3.Connection, post_id: int, metadata_json: str) -> None:
+    """Overwrite posts.metadata_json without touching the history table."""
+    conn.execute(
+        "UPDATE posts SET metadata_json = ?, updated_at = ? WHERE id = ?",
+        (metadata_json, now_iso(), post_id),
+    )
+
+
+def update_worklog_content(conn: sqlite3.Connection, work_id: int, content: str) -> int:
+    row = conn.execute(
+        "SELECT creator_id FROM worklogs WHERE id = ?",
+        (work_id,),
+    ).fetchone()
+    if row is None:
+        raise UserError(f"Worklog not found: {work_id}")
+    creator_id = int(row["creator_id"])
+    if not content.strip():
+        raise UserError("content is required")
+    conn.execute(
+        "UPDATE worklogs SET content = ?, updated_at = ? WHERE id = ?",
+        (content, now_iso(), work_id),
+    )
+    return creator_id
+
+
+def delete_worklog_row(conn: sqlite3.Connection, work_id: int) -> int:
+    row = conn.execute(
+        "SELECT creator_id FROM worklogs WHERE id = ?",
+        (work_id,),
+    ).fetchone()
+    if row is None:
+        raise UserError(f"Worklog not found: {work_id}")
+    creator_id = int(row["creator_id"])
+    conn.execute("DELETE FROM worklogs WHERE id = ?", (work_id,))
+    return creator_id
+
+
+def update_reminder_fields(
+    conn: sqlite3.Connection,
+    creator_id: int,
+    *,
+    next_due_at: str,
+    interval_days: int | None,
+    note: str | None,
+) -> None:
+    row = conn.execute(
+        "SELECT id FROM reminders WHERE creator_id = ?",
+        (creator_id,),
+    ).fetchone()
+    if row is None:
+        raise UserError(f"No reminder for creator #{creator_id}")
+    conn.execute(
+        """
+        UPDATE reminders
+        SET next_due_at = ?,
+            interval_days = ?,
+            note = ?,
+            updated_at = ?
+        WHERE creator_id = ?
+        """,
+        (next_due_at, interval_days, note, now_iso(), creator_id),
+    )
+
+
+def delete_reminder_row(conn: sqlite3.Connection, creator_id: int) -> bool:
+    cur = conn.execute("DELETE FROM reminders WHERE creator_id = ?", (creator_id,))
+    return cur.rowcount > 0
+

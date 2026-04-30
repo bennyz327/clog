@@ -25,14 +25,33 @@ class WriteDialog(QDialog):
     write call via ``invoke()``. On success ``accept_result(result)`` runs
     and the dialog closes; on UserError / AmbiguousTarget a QMessageBox
     shows the error and the dialog stays open.
+
+    When ``locked_target`` is supplied, the operation target is fixed by
+    upstream context (e.g. a row in the search pane). The dialog title gets
+    a ``（#<id> <name>）`` suffix and subclasses are expected to skip the
+    Target field. Use ``self.locked_target`` to read the dict and
+    ``self.locked_target_clause()`` to get the canonical ``#id`` string.
     """
 
     title: str = "clog"
 
-    def __init__(self, controller: Controller, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        controller: Controller,
+        parent: QWidget | None = None,
+        *,
+        locked_target: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(parent)
         self._controller = controller
-        self.setWindowTitle(self.title)
+        self._locked_target = locked_target
+        title = self.title
+        if locked_target is not None:
+            display = locked_target.get("display_name") or ""
+            cid = locked_target.get("creator_id")
+            suffix = f"（#{cid} {display}）" if display else f"（#{cid}）"
+            title = f"{self.title}{suffix}"
+        self.setWindowTitle(title)
         self.setModal(True)
         self.setMinimumWidth(420)
 
@@ -62,6 +81,17 @@ class WriteDialog(QDialog):
     def controller(self) -> Controller:
         return self._controller
 
+    @property
+    def locked_target(self) -> dict[str, Any] | None:
+        return self._locked_target
+
+    def locked_target_clause(self) -> str | None:
+        """Return ``#<creator_id>`` when target is locked, else None."""
+        if self._locked_target is None:
+            return None
+        cid = self._locked_target.get("creator_id")
+        return None if cid is None else f"#{int(cid)}"
+
     def build_form(self, form: QFormLayout) -> None:  # pragma: no cover - abstract
         raise NotImplementedError
 
@@ -82,8 +112,8 @@ class WriteDialog(QDialog):
         *,
         level: str = "info",
         detail: str | None = None,
-        sticky: bool = False,
-        timeout_ms: int = 4500,
+        sticky: bool = True,
+        timeout_ms: int = 0,
     ) -> None:
         self._controller.pubsub.pub(
             "message",

@@ -44,6 +44,7 @@ exe = EXE(
     a.datas,
     [],
     name='clog-cli',
+    icon='static/app.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

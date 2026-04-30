@@ -8,7 +8,7 @@ from ._base import WriteDialog
 
 
 class AddCreatorDialog(WriteDialog):
-    title = "Add Creator"
+    title = "新增創作者"
 
     def build_form(self, form: QFormLayout) -> None:
         self._name = QLineEdit()

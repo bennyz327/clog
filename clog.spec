@@ -70,7 +70,6 @@ PYSIDE6_EXCLUDES = [
     'PySide6.QtSpatialAudio',
     'PySide6.QtSql',
     'PySide6.QtStateMachine',
-    'PySide6.QtSvg',
     'PySide6.QtSvgWidgets',
     'PySide6.QtTest',
     'PySide6.QtTextToSpeech',
@@ -140,7 +139,7 @@ PYSIDE6_FILE_EXCLUDE_PATTERNS = (
     'QtSpatialAudio.pyd',
     'QtSql.pyd',
     'QtStateMachine.pyd',
-    'QtSvg*.pyd',
+    'QtSvgWidgets.pyd',
     'QtTest.pyd',
     'QtTextToSpeech.pyd',
     'QtUiTools.pyd',
@@ -176,7 +175,7 @@ PYSIDE6_FILE_EXCLUDE_PATTERNS = (
     'Qt6SpatialAudio*',
     'Qt6Sql*',
     'Qt6StateMachine*',
-    'Qt6Svg*',
+    'Qt6SvgWidgets*',
     'Qt6Test*',
     'Qt6TextToSpeech*',
     'Qt6UiTools*',
@@ -301,6 +300,15 @@ binaries += _filter_pyside6_entries(pyside6_binaries)
 datas += [('src/gui/themes/light.qss', 'gui/themes'),
           ('src/gui/themes/dark.qss',  'gui/themes')]
 
+# bundle the icon resource set (see static/spec.txt)
+datas += [
+    ('static/app.ico',         'static'),
+    ('static/app.png',         'static'),
+    ('static/app-dark.svg',    'static'),
+    ('static/app-light.svg',   'static'),
+    ('static/app-splash.png',  'static'),
+]
+
 
 a = Analysis(
     ['clog_gui.py'],
@@ -326,7 +334,7 @@ exe = EXE(
     exclude_binaries=True,
     contents_directory='lib',    # hydrus-style: dist/clog/lib/ (default would be _internal)
     name='clog',
-    icon='static\\clog.ico',
+    icon='static/app.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

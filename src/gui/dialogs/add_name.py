@@ -9,26 +9,30 @@ from ._base import WriteDialog
 
 
 class AddNameDialog(WriteDialog):
-    title = "Add Name"
-
-    def __init__(self, controller, parent=None, *, default_target: str | None = None):
-        self._default_target = default_target or ""
-        super().__init__(controller, parent)
+    title = "新增別名"
 
     def build_form(self, form: QFormLayout) -> None:
-        self._target = QLineEdit(self._default_target)
-        self._target.setPlaceholderText("#id, URL, or name")
         self._name = QLineEdit()
         self._name.setPlaceholderText("alias or new display name")
         self._context = QLineEdit()
         self._context.setPlaceholderText("optional: platform name OR creator-page URL")
-        form.addRow("Target", self._target)
+
+        if self.locked_target is None:
+            self._target = QLineEdit()
+            self._target.setPlaceholderText("#id, URL, or name")
+            form.addRow("Target", self._target)
+        else:
+            self._target = None
+
         form.addRow("Name", self._name)
         form.addRow("Context", self._context)
-        (self._name if self._default_target else self._target).setFocus()
+        self._name.setFocus()
 
     def invoke(self) -> dict[str, Any]:
-        target = self._target.text().strip()
+        target = self.locked_target_clause()
+        if target is None:
+            assert self._target is not None
+            target = self._target.text().strip()
         name = self._name.text().strip()
         if not target:
             raise UserError("target is required")

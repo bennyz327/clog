@@ -49,6 +49,17 @@ QPlainTextEdit, QTextEdit {
     font-family: "Cascadia Mono", "Consolas", "Courier New", monospace;
 }
 
+QFrame#OverviewStatCard {
+    background-color: #31353a;
+    border: 1px solid #24272a;
+    border-radius: 6px;
+}
+
+QFrame#OverviewStatCard:hover {
+    background-color: #3a3f44;
+    border: 1px solid #4a88c7;
+}
+
 QFrame#NotificationManager {
     background: transparent;
 }
