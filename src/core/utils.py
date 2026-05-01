@@ -15,6 +15,10 @@ def now_iso() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def now_epoch() -> int:
+    return int(dt.datetime.now(dt.timezone.utc).timestamp())
+
+
 def today() -> dt.date:
     return dt.date.today()
 

@@ -4,8 +4,6 @@ from pathlib import Path
 from typing import Any
 
 from core.config import LOGGER
-from core.enrichment import SubprocessDriver
-from core.utils import make_parser, parse_known
 from db import connect
 from .commands import (
     cmd_add,
@@ -53,13 +51,6 @@ COMMANDS: dict[str, tuple[str, CommandHandler]] = {
 
 def dispatch(db_path: Path, _quiet: bool, argv: list[str]) -> int:
     LOGGER.info("Dispatch db=%s argv=%s", db_path, argv)
-    if argv and argv[0] == "__meta_worker":
-        parser = make_parser("clog __meta_worker")
-        parser.add_argument("--limit", type=int, default=5)
-        ns = parse_known(parser, argv[1:])
-        SubprocessDriver.process(db_path, ns.limit)
-        return 0
-
     if argv and argv[0] in ("-h", "--help", "help"):
         print_help()
         return 0

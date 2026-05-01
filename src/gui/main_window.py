@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -23,6 +23,7 @@ from .dialogs import (
     SetReminderDialog,
 )
 from .notifications import NotificationManager, NotificationPayload
+from .panels import JobsPanel
 from .pubsub_bridge import QtPubSubBridge
 from .resources import app_icon
 from .tabs import (
@@ -47,6 +48,7 @@ class ClogMainWindow(QMainWindow):
         self._bridge = bridge
         self._notifications = NotificationManager(self)
 
+        self._jobs_panel = JobsPanel(controller)
         self._build_menubar()
         self._build_central()
         self._build_status_bar()
@@ -61,6 +63,12 @@ class ClogMainWindow(QMainWindow):
         act_add_creator.setShortcut(QKeySequence("Ctrl+N"))
         act_add_creator.triggered.connect(self._open_add_creator)
         add_menu.addAction(act_add_creator)
+
+        network_menu = bar.addMenu("網路")
+        act_jobs = QAction("後台工作", self)
+        act_jobs.setShortcut(QKeySequence("Ctrl+J"))
+        act_jobs.triggered.connect(self._open_jobs_panel)
+        network_menu.addAction(act_jobs)
 
         settings_menu = bar.addMenu("設定")
         theme_menu = QMenu("介面主題", self)
@@ -101,10 +109,12 @@ class ClogMainWindow(QMainWindow):
             "add_post",
             "set_reminder",
             "add_work",
+            "refetch_post_meta",
         ):
             self._controller.pubsub.sub(self, "_on_data_changed", f"data.{action}")
-        self._controller.pubsub.sub(self, "_on_enrichment_completed", "enrichment.completed")
+        self._controller.pubsub.sub(self, "_on_data_changed", "data.changed")
         self._controller.pubsub.sub(self, "_on_message", "message")
+        self._controller.pubsub.sub(self, "_on_queue_updated", "queue.updated")
 
     # ── pubsub handlers ────────────────────────────────────────────────────
     def _on_message(self, payload: NotificationPayload | dict[str, Any] | str) -> None:
@@ -120,15 +130,9 @@ class ClogMainWindow(QMainWindow):
     def _on_data_changed(self, **_kwargs: Any) -> None:
         self._refresh_views()
 
-    def _on_enrichment_completed(self, processed: int | None = None, **_kwargs: Any) -> None:
-        count = int(processed or 0)
-        self.statusBar().showMessage("metadata enrichment finished", 4000)
-        self._refresh_views()
-        self._notify(
-            "Metadata Enrichment",
-            f"Finished background metadata enrichment for {count} profile(s)." if count else "Finished background metadata enrichment.",
-            level="success",
-        )
+    def _on_queue_updated(self, **_kwargs: Any) -> None:
+        if self._jobs_panel.isVisible():
+            self._jobs_panel.refresh()
 
     def _refresh_views(self) -> None:
         try:
@@ -193,6 +197,11 @@ class ClogMainWindow(QMainWindow):
     def _open_add_creator(self) -> None:
         AddCreatorDialog(self._controller, self).exec()
 
+    def _open_jobs_panel(self) -> None:
+        self._jobs_panel.show()
+        self._jobs_panel.raise_()
+        self._jobs_panel.activateWindow()
+
     # ── theme switch ───────────────────────────────────────────────────────
     def _switch_theme(self, name: ThemeName) -> None:
         app = QApplication.instance()
@@ -227,6 +236,16 @@ class ClogMainWindow(QMainWindow):
         )
 
     # ── lifecycle ──────────────────────────────────────────────────────────
+    def event(self, event: QEvent) -> bool:
+        if event.type() in (
+            QEvent.Type.KeyPress,
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonDblClick,
+            QEvent.Type.Wheel,
+        ):
+            self._controller.record_user_activity()
+        return super().event(event)
+
     def closeEvent(self, event) -> None:
         self._bridge.shutdown()
         super().closeEvent(event)

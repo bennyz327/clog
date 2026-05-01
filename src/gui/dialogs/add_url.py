@@ -39,4 +39,24 @@ class AddUrlDialog(WriteDialog):
         if not url:
             raise UserError("URL is required")
         note = self._note.text().strip() or None
-        return self.controller.write("add_url", target, url, note=note)
+        result = self.controller.write(
+            "add_url",
+            target,
+            url,
+            note=note,
+            resolve_metadata=False,
+        )
+        if result.get("needs_worker") and result.get("url_id") is not None:
+            receipt = self.controller.submit_background_job(
+                "profile.resolve_metadata",
+                {"profile_url_id": int(result["url_id"])},
+                dedupe_key=f"profile.resolve_metadata:{int(result['url_id'])}",
+            )
+            result["queued"] = True
+            result["job_id"] = receipt["job_id"]
+        return result
+
+    def success_text(self, result: dict[str, Any]) -> str:
+        if result.get("queued"):
+            return "已寫入並排入後台工作"
+        return super().success_text(result)

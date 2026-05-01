@@ -38,7 +38,6 @@ from db import (
     update_profile_url_fields,
     update_reminder_fields,
     update_worklog_content,
-    upsert_profile_job,
 )
 from .gallery import classify_url_kind, extract_metadata, run_gallery_metadata
 from .utils import canonical_url, infer_platform_from_url, is_url, json_dumps, now_iso, parse_when
@@ -61,6 +60,8 @@ def attach_profile_url(
     source: str,
     timeout: int = 45,
     create_job: bool = True,
+    live_status: Any = None,
+    resolve_metadata: bool = True,
 ) -> dict[str, Any]:
     canon = canonical_url(url)
     if not canon:
@@ -76,12 +77,19 @@ def attach_profile_url(
             f"URL is already linked to {creator_label(conn, int(existing_url['creator_id']))}: {url}"
         )
 
-    metadata, error = run_gallery_metadata(url, timeout=timeout, quick=True)
-    info = extract_metadata(metadata, url) if metadata else {}
-    platform = info.get("platform") or infer_platform_from_url(canon)
-    platform_id = info.get("platform_id")
-    display_name = info.get("author_name")
-    metadata_json = metadata if metadata else None
+    metadata: list[Any] = []
+    error: str | None = None
+    platform = infer_platform_from_url(canon)
+    platform_id = None
+    display_name = None
+    metadata_json = None
+    if resolve_metadata:
+        metadata, error = run_gallery_metadata(url, timeout=timeout, quick=True, live_status=live_status)
+        info = extract_metadata(metadata, url) if metadata else {}
+        platform = info.get("platform") or infer_platform_from_url(canon)
+        platform_id = info.get("platform_id")
+        display_name = info.get("author_name")
+        metadata_json = metadata if metadata else None
 
     profile_id: int
     url_id: int
@@ -93,7 +101,7 @@ def attach_profile_url(
         if current_profile is None:
             raise UserError(f"Profile not found for URL: {url}")
 
-        if platform and platform_id:
+        if resolve_metadata and platform and platform_id:
             matched_profile = profile_row_by_identity(conn, platform, platform_id)
             if matched_profile is not None and int(matched_profile["creator_id"]) != creator_id:
                 raise ConflictError(
@@ -144,14 +152,22 @@ def attach_profile_url(
                 )
         else:
             profile_id = current_profile_id
-            update_profile(
-                conn,
-                profile_id,
-                platform=platform,
-                display_name=display_name,
-                source=source,
-                metadata=metadata_json,
-            )
+            if resolve_metadata:
+                update_profile(
+                    conn,
+                    profile_id,
+                    platform=platform,
+                    display_name=display_name,
+                    source=source,
+                    metadata=metadata_json,
+                )
+            elif platform and not current_profile["platform"]:
+                update_profile(
+                    conn,
+                    profile_id,
+                    platform=platform,
+                    source=source,
+                )
 
         update_profile_url(
             conn,
@@ -160,7 +176,7 @@ def attach_profile_url(
             note=note,
         )
     else:
-        if platform and platform_id:
+        if resolve_metadata and platform and platform_id:
             matched_profile = profile_row_by_identity(conn, platform, platform_id)
             if matched_profile is not None:
                 if int(matched_profile["creator_id"]) != creator_id:
@@ -195,8 +211,8 @@ def attach_profile_url(
                 display_name=display_name,
                 source=source,
                 identity_state="unresolved",
-                metadata=metadata_json,
-            )
+            metadata=metadata_json,
+        )
         url_id = insert_profile_url(
             conn,
             profile_id,
@@ -205,15 +221,17 @@ def attach_profile_url(
             note=note,
         )
 
-    if create_job and (error or not platform_id):
-        upsert_profile_job(conn, url_id)
+    worker_needed = bool(create_job and (error or not platform_id))
+    if not resolve_metadata:
+        current_profile = profile_row(conn, profile_id)
+        worker_needed = bool(create_job and (current_profile is None or not current_profile["platform_id"]))
 
     return {
         "creator_id": creator_id,
         "profile_id": profile_id,
         "url_id": url_id,
         "warning": error,
-        "needs_worker": bool(create_job and (error or not platform_id)),
+        "needs_worker": worker_needed,
     }
 
 
@@ -224,6 +242,8 @@ def add_creator_record(
     *,
     url: str | None = None,
     note: str | None = None,
+    live_status: Any = None,
+    resolve_metadata: bool = True,
 ) -> dict[str, Any]:
     with conn:
         creator_id = insert_creator(conn, name, note=note)
@@ -235,10 +255,13 @@ def add_creator_record(
                 url,
                 note=note,
                 source="initial-url",
+                live_status=live_status,
+                resolve_metadata=resolve_metadata,
             )
         sync_creator_search(conn, creator_id)
     return {
         "creator_id": creator_id,
+        "url_id": attached["url_id"] if attached else None,
         "warning": attached["warning"] if attached else None,
         "needs_worker": bool(attached and attached.get("needs_worker")),
     }
@@ -252,6 +275,8 @@ def add_name_record(
     *,
     context: str | None = None,
     profile_id: int | None = None,
+    live_status: Any = None,
+    resolve_metadata: bool = True,
 ) -> dict[str, Any]:
     creator_id = resolve_target(conn, target)
     attached: dict[str, Any] | None = None
@@ -273,6 +298,8 @@ def add_name_record(
                 creator_id,
                 context,
                 source="profile-from-url",
+                live_status=live_status,
+                resolve_metadata=resolve_metadata,
             )
             alias_id = insert_alias(
                 conn,
@@ -310,6 +337,7 @@ def add_name_record(
     return {
         "creator_id": creator_id,
         "profile_id": attached["profile_id"] if attached else profile_id,
+        "url_id": attached["url_id"] if attached else None,
         "alias_id": alias_id,
         "warning": attached["warning"] if attached else None,
         "needs_worker": bool(attached and attached.get("needs_worker")),
@@ -323,6 +351,8 @@ def add_url_record(
     url: str,
     *,
     note: str | None = None,
+    live_status: Any = None,
+    resolve_metadata: bool = True,
 ) -> dict[str, Any]:
     creator_id = resolve_target(conn, target)
     with conn:
@@ -332,6 +362,8 @@ def add_url_record(
             url,
             note=note,
             source="manual-url",
+            live_status=live_status,
+            resolve_metadata=resolve_metadata,
         )
         sync_creator_search(conn, creator_id)
     return attached
@@ -345,8 +377,9 @@ def add_post_record(
     target: str | None = None,
     note: str | None = None,
     timeout: int = 60,
+    live_status: Any = None,
 ) -> dict[str, Any]:
-    metadata, error = run_gallery_metadata(url, timeout=timeout)
+    metadata, error = run_gallery_metadata(url, timeout=timeout, live_status=live_status)
     if error:
         raise UserError(error)
     info = extract_metadata(metadata, url)
@@ -618,11 +651,12 @@ def refetch_post_meta_record(
     post_id: int,
     *,
     timeout: int = 60,
+    live_status: Any = None,
 ) -> dict[str, Any]:
     """Re-run gdl on the post URL, append meta to history, refresh posts.metadata_json."""
     post = fetch_post_detail_row(conn, post_id)
     url = post["url"]
-    metadata, error = run_gallery_metadata(url, timeout=timeout)
+    metadata, error = run_gallery_metadata(url, timeout=timeout, live_status=live_status)
     if error:
         raise UserError(error)
     if not metadata:

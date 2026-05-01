@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 from typing import Any
 
 from db import read_app_setting
@@ -165,7 +166,13 @@ def parse_json_stream(output: str) -> list[Any]:
     return values
 
 
-def run_gallery_metadata(url: str, timeout: int = 60, *, quick: bool = False) -> tuple[list[Any], str | None]:
+def run_gallery_metadata(
+    url: str,
+    timeout: int = 60,
+    *,
+    quick: bool = False,
+    live_status: Any = None,
+) -> tuple[list[Any], str | None]:
     cmd = gallery_external_command()
     errors: list[str] = []
     range_flags = ["--post-range", "1"] if quick else []
@@ -174,26 +181,45 @@ def run_gallery_metadata(url: str, timeout: int = 60, *, quick: bool = False) ->
             cmd + ["--dump-json"] + range_flags + [url],
             cmd + ["-j"] + range_flags + [url],
         ]
+        _win_flags = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
         for command in attempts:
             try:
-                proc = subprocess.run(
+                proc = subprocess.Popen(
                     command,
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    timeout=timeout,
-                    check=False,
+                    **_win_flags,
                 )
-            except subprocess.TimeoutExpired:
-                errors.append("gallery-dl timed out")
-                continue
             except OSError as exc:
                 errors.append(str(exc))
                 continue
-            values = parse_json_stream(proc.stdout)
+            if live_status is not None:
+                live_status.set_status_text(f"正在以 gallery-dl 擷取：{shorten(url, 80)}")
+                live_status.set_terminate_callable(lambda p=proc: _terminate_process(p))
+            start = time.monotonic()
+            while proc.poll() is None:
+                if live_status is not None and live_status.cancel_requested():
+                    _terminate_process(proc)
+                    if live_status is not None:
+                        live_status.set_terminate_callable(None)
+                    return [], "使用者已取消"
+                if timeout > 0 and (time.monotonic() - start) >= timeout:
+                    _terminate_process(proc)
+                    if live_status is not None:
+                        live_status.set_terminate_callable(None)
+                    errors.append("gallery-dl 執行逾時")
+                    break
+                time.sleep(0.1)
+            if proc.poll() is None:
+                continue
+            stdout, stderr = proc.communicate()
+            if live_status is not None:
+                live_status.set_terminate_callable(None)
+            values = parse_json_stream(stdout or "")
             if values:
                 return values, None
-            raw_diag = strip_ansi(proc.stderr or proc.stdout or "")
+            raw_diag = strip_ansi(stderr or stdout or "")
             if proc.returncode != 0:
                 msg = shorten(raw_diag or f"exit {proc.returncode}", 500)
             else:
@@ -207,9 +233,23 @@ def run_gallery_metadata(url: str, timeout: int = 60, *, quick: bool = False) ->
         if error:
             errors.append(error)
     if not errors:
-        return [], "gallery-dl is not available"
+        return [], "gallery-dl 無法使用"
     errors = unique_messages(errors)
-    return [], "; ".join(errors) if errors else "gallery-dl failed"
+    return [], "; ".join(errors) if errors else "gallery-dl 執行失敗"
+
+
+def _terminate_process(proc: subprocess.Popen[str]) -> None:
+    try:
+        proc.terminate()
+    except OSError:
+        return
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            return
 
 
 def run_gallery_module(url: str, *, quick: bool = False) -> tuple[list[Any], str | None]:

@@ -42,6 +42,13 @@ class AddPostDialog(WriteDialog):
         if target is None and self._target is not None:
             target = self._target.text().strip() or None
         note = self._note.text().strip() or None
-        return self.controller.write(
-            "add_post", url, target=target, note=note, timeout=int(self._timeout.value())
+        timeout = int(self._timeout.value())
+        receipt = self.controller.submit_background_job(
+            "command.add_post",
+            {"url": url, "target": target, "note": note, "timeout": timeout},
+            dedupe_key=f"command.add_post:{url}",
         )
+        return {"queued": True, "job_id": receipt["job_id"]}
+
+    def success_text(self, result: dict[str, Any]) -> str:
+        return "已排入後台工作"

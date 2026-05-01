@@ -119,7 +119,6 @@ def write_default_config(path: Path | None = None) -> None:
     data = {
         "db_path": DB_NAME,
         "gallery_dl_command": None,
-        "metadata_worker_limit": 5,
     }
     resolved_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 

@@ -5,9 +5,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from core.background_handlers import run_background_job_inline
+from core.background_runtime import BackgroundEnqueueApi
 from core.constants import UserError
 from core.config import config_path, write_default_config
-from core.enrichment import SubprocessDriver
 from core.render import render_creator_snapshot
 from core.service import (
     add_creator_record,
@@ -47,9 +48,36 @@ def _show_creator(conn: sqlite3.Connection, creator_id: int) -> None:
     print(render_creator_snapshot(fetch_creator_snapshot(conn, creator_id)))
 
 
-def _maybe_kick_worker(result: dict[str, Any], db_path: Path) -> None:
-    if isinstance(result, dict) and result.get("needs_worker"):
-        SubprocessDriver.spawn(db_path)
+def _add_async_mode(parser) -> None:
+    parser.add_argument(
+        "--async-mode",
+        choices=("inline", "enqueue"),
+        default="inline",
+        help="inline: finish in this CLI call; enqueue: store a background job for the GUI runtime",
+    )
+
+
+def _enqueue_job(
+    db_path: Path,
+    job_type: str,
+    payload: dict[str, Any],
+    *,
+    dedupe_key: str | None = None,
+) -> dict[str, Any]:
+    return BackgroundEnqueueApi(db_path).enqueue(
+        job_type,
+        payload,
+        source="cli",
+        dedupe_key=dedupe_key,
+    )
+
+
+def _print_enqueued(receipt: dict[str, Any], label: str) -> None:
+    job_id = int(receipt["job_id"])
+    if receipt.get("deduplicated"):
+        print(f"{label} already queued as job #{job_id}")
+    else:
+        print(f"{label} queued as job #{job_id}")
 
 
 def show_search_selection(
@@ -169,12 +197,39 @@ def cmd_add(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
     parser.add_argument("name")
     parser.add_argument("url", nargs="?")
     parser.add_argument("--note")
+    _add_async_mode(parser)
     ns = parse_known(parser, args)
-    result = add_creator_record(
-        conn, db_path, ns.name,
-        url=ns.url, note=ns.note,
-    )
-    _maybe_kick_worker(result, db_path)
+    if ns.url and ns.async_mode == "enqueue":
+        result = add_creator_record(
+            conn,
+            db_path,
+            ns.name,
+            url=ns.url,
+            note=ns.note,
+            resolve_metadata=False,
+        )
+        print(f"added {creator_label(conn, result['creator_id'])}")
+        if result.get("needs_worker") and result.get("url_id") is not None:
+            receipt = _enqueue_job(
+                db_path,
+                "profile.resolve_metadata",
+                {"profile_url_id": int(result["url_id"])},
+                dedupe_key=f"profile.resolve_metadata:{int(result['url_id'])}",
+            )
+            _print_enqueued(receipt, "profile metadata resolution")
+        return
+    if ns.url:
+        result = run_background_job_inline(
+            conn,
+            db_path,
+            "command.add_creator_with_url",
+            {"name": ns.name, "url": ns.url, "note": ns.note},
+        )
+    else:
+        result = add_creator_record(
+            conn, db_path, ns.name,
+            url=ns.url, note=ns.note,
+        )
     if result.get("warning"):
         print(f"warning: {result['warning']}")
     print(f"added {creator_label(conn, result['creator_id'])}")
@@ -185,12 +240,39 @@ def cmd_name(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
     parser.add_argument("target")
     parser.add_argument("name")
     parser.add_argument("context", nargs="?")
+    _add_async_mode(parser)
     ns = parse_known(parser, args)
-    result = add_name_record(
-        conn, db_path, ns.target, ns.name,
-        context=ns.context,
-    )
-    _maybe_kick_worker(result, db_path)
+    if ns.context and ns.context.startswith(("http://", "https://")) and ns.async_mode == "enqueue":
+        result = add_name_record(
+            conn,
+            db_path,
+            ns.target,
+            ns.name,
+            context=ns.context,
+            resolve_metadata=False,
+        )
+        print(f"added alias #{result['alias_id']} to {creator_label(conn, result['creator_id'])}")
+        if result.get("needs_worker") and result.get("url_id") is not None:
+            receipt = _enqueue_job(
+                db_path,
+                "profile.resolve_metadata",
+                {"profile_url_id": int(result["url_id"])},
+                dedupe_key=f"profile.resolve_metadata:{int(result['url_id'])}",
+            )
+            _print_enqueued(receipt, "profile metadata resolution")
+        return
+    if ns.context and ns.context.startswith(("http://", "https://")):
+        result = run_background_job_inline(
+            conn,
+            db_path,
+            "command.add_name_with_url",
+            {"target": ns.target, "name": ns.name, "context": ns.context},
+        )
+    else:
+        result = add_name_record(
+            conn, db_path, ns.target, ns.name,
+            context=ns.context,
+        )
     if result.get("warning"):
         print(f"warning: {result['warning']}")
     print(f"added alias #{result['alias_id']} to {creator_label(conn, result['creator_id'])}")
@@ -201,12 +283,33 @@ def cmd_url(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
     parser.add_argument("target")
     parser.add_argument("url")
     parser.add_argument("--note")
+    _add_async_mode(parser)
     ns = parse_known(parser, args)
-    result = add_url_record(
-        conn, db_path, ns.target, ns.url,
-        note=ns.note,
+    if ns.async_mode == "enqueue":
+        result = add_url_record(
+            conn,
+            db_path,
+            ns.target,
+            ns.url,
+            note=ns.note,
+            resolve_metadata=False,
+        )
+        print(f"attached url #{result['url_id']} to {creator_label(conn, result['creator_id'])}")
+        if result.get("needs_worker") and result.get("url_id") is not None:
+            receipt = _enqueue_job(
+                db_path,
+                "profile.resolve_metadata",
+                {"profile_url_id": int(result["url_id"])},
+                dedupe_key=f"profile.resolve_metadata:{int(result['url_id'])}",
+            )
+            _print_enqueued(receipt, "profile metadata resolution")
+        return
+    result = run_background_job_inline(
+        conn,
+        db_path,
+        "command.add_url",
+        {"target": ns.target, "url": ns.url, "note": ns.note},
     )
-    _maybe_kick_worker(result, db_path)
     if result.get("warning"):
         print(f"warning: {result['warning']}")
     print(f"attached url #{result['url_id']} to {creator_label(conn, result['creator_id'])}")
@@ -218,12 +321,24 @@ def cmd_post(conn: sqlite3.Connection, db_path: Path, args: list[str]) -> None:
     parser.add_argument("target", nargs="?")
     parser.add_argument("--note")
     parser.add_argument("--timeout", type=int, default=60)
+    _add_async_mode(parser)
     ns = parse_known(parser, args)
-    result = add_post_record(
-        conn, db_path, ns.url,
-        target=ns.target, note=ns.note, timeout=ns.timeout,
-    )
-    _maybe_kick_worker(result, db_path)
+    payload = {
+        "url": ns.url,
+        "target": ns.target,
+        "note": ns.note,
+        "timeout": ns.timeout,
+    }
+    if ns.async_mode == "enqueue":
+        receipt = _enqueue_job(
+            db_path,
+            "command.add_post",
+            payload,
+            dedupe_key=f"command.add_post:{ns.url}",
+        )
+        _print_enqueued(receipt, "add post")
+        return
+    result = run_background_job_inline(conn, db_path, "command.add_post", payload)
     if result.get("warning"):
         print(f"warning: {result['warning']}")
     print(f"recorded post #{result['post_id']} for {creator_label(conn, result['creator_id'])}")

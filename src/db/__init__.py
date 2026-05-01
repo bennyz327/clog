@@ -13,6 +13,7 @@ from core.utils import (
     is_url,
     json_dumps,
     json_loads,
+    now_epoch,
     normalize_pid,
     normalize_platform,
     now_iso,
@@ -163,14 +164,46 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS profile_enrichment_jobs (
+        CREATE TABLE IF NOT EXISTS background_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            profile_url_id INTEGER NOT NULL UNIQUE REFERENCES profile_urls(id) ON DELETE CASCADE,
-            status TEXT NOT NULL DEFAULT 'pending',
-            attempts INTEGER NOT NULL DEFAULT 0,
-            last_error TEXT,
+            job_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'gui',
+            status TEXT NOT NULL DEFAULT 'queued',
+            outcome_code TEXT,
+            slot_key TEXT NOT NULL DEFAULT 'gdl',
+            dedupe_key TEXT,
+            priority INTEGER NOT NULL DEFAULT 100,
+            payload_json TEXT NOT NULL,
+            result_json TEXT,
+            error_text TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 3,
+            run_after INTEGER NOT NULL DEFAULT 0,
+            worker_id TEXT,
+            lease_expires_at INTEGER,
+            heartbeat_at INTEGER,
+            cancel_requested_at TEXT,
+            terminate_requested_at TEXT,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS background_job_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL REFERENCES background_jobs(id) ON DELETE CASCADE,
+            event_type TEXT NOT NULL,
+            payload_json TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS app_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic TEXT NOT NULL,
+            payload_json TEXT,
+            created_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS post_meta_history (
@@ -198,7 +231,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_posts_profile ON posts(profile_id);
         CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(next_due_at);
         CREATE INDEX IF NOT EXISTS idx_worklogs_creator ON worklogs(creator_id);
-        CREATE INDEX IF NOT EXISTS idx_profile_jobs_status ON profile_enrichment_jobs(status, attempts);
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_status ON background_jobs(status, priority, run_after, id);
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_slot ON background_jobs(slot_key, status, run_after, id);
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_dedupe ON background_jobs(dedupe_key);
+        CREATE INDEX IF NOT EXISTS idx_background_job_events_job ON background_job_events(job_id, id);
+        CREATE INDEX IF NOT EXISTS idx_app_events_id ON app_events(id);
         CREATE INDEX IF NOT EXISTS idx_post_meta_history_post ON post_meta_history(post_id, captured_at DESC);
 
         CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
@@ -227,7 +264,28 @@ def _seed_app_settings(conn: sqlite3.Connection) -> None:
 
     defaults: dict[tuple[str, str], Any] = {
         ("system", "gallery_dl_command"): None,
-        ("system", "metadata_worker_limit"): 5,
+        ("system", "background_work_during_idle"): True,
+        ("system", "background_work_during_active"): True,
+        ("system", "background_idle_threshold_seconds"): 20,
+        ("system", "background_queue_poll_interval_ms"): 1000,
+        ("system", "background_queue_global_concurrency"): 2,
+        ("system", "background_active_packet_ms"): 1000,
+        ("system", "background_active_rest_percentage"): 200,
+        ("system", "background_idle_packet_ms"): 1000,
+        ("system", "background_idle_rest_percentage"): 25,
+        ("system", "background_slot_limits"): {
+            "gdl": 1,
+            "ffmpeg": 1,
+            "http": 2,
+        },
+        ("system", "background_handler_limits"): {
+            "profile.resolve_metadata": {"max_attempts": 3, "timeout_seconds": 45},
+            "command.add_creator_with_url": {"max_attempts": 1, "timeout_seconds": 60},
+            "command.add_name_with_url": {"max_attempts": 1, "timeout_seconds": 60},
+            "command.add_url": {"max_attempts": 1, "timeout_seconds": 60},
+            "command.add_post": {"max_attempts": 1, "timeout_seconds": 90},
+            "command.refetch_post_meta": {"max_attempts": 1, "timeout_seconds": 90},
+        },
         ("user", "theme"): "light",
     }
 
@@ -235,8 +293,6 @@ def _seed_app_settings(conn: sqlite3.Connection) -> None:
     if isinstance(legacy, dict):
         if "gallery_dl_command" in legacy:
             defaults[("system", "gallery_dl_command")] = legacy.get("gallery_dl_command")
-        if "metadata_worker_limit" in legacy:
-            defaults[("system", "metadata_worker_limit")] = legacy.get("metadata_worker_limit")
 
     for (scope, key), value in defaults.items():
         conn.execute(
@@ -309,6 +365,516 @@ def read_app_setting(db_path: Path, scope: str, key: str, default: Any = None) -
 def _settings_value_json(value: Any) -> str:
     encoded = json_dumps(value)
     return "null" if encoded is None else encoded
+
+
+def emit_app_event(conn: sqlite3.Connection, topic: str, payload: Any = None) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO app_events(topic, payload_json, created_at)
+        VALUES(?, ?, ?)
+        """,
+        (topic, _settings_value_json(payload), now_iso()),
+    )
+    return require_lastrowid(cur)
+
+
+def list_app_events_since(conn: sqlite3.Connection, last_event_id: int, limit: int = 200) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT id, topic, payload_json, created_at
+        FROM app_events
+        WHERE id > ?
+        ORDER BY id
+        LIMIT ?
+        """,
+        (int(last_event_id), int(limit)),
+    ).fetchall()
+
+
+def get_latest_app_event_id(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT max(id) AS max_id FROM app_events").fetchone()
+    if row is None or row["max_id"] is None:
+        return 0
+    return int(row["max_id"])
+
+
+def _insert_background_job_event(
+    conn: sqlite3.Connection,
+    job_id: int,
+    event_type: str,
+    payload: Any = None,
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO background_job_events(job_id, event_type, payload_json, created_at)
+        VALUES(?, ?, ?, ?)
+        """,
+        (int(job_id), event_type, _settings_value_json(payload), now_iso()),
+    )
+    return require_lastrowid(cur)
+
+
+def enqueue_background_job(
+    conn: sqlite3.Connection,
+    job_type: str,
+    title: str,
+    payload: dict[str, Any],
+    *,
+    source: str = "gui",
+    slot_key: str = "gdl",
+    dedupe_key: str | None = None,
+    priority: int = 100,
+    max_attempts: int = 3,
+    run_after: int | None = None,
+) -> dict[str, Any]:
+    ts = now_iso()
+    due_at = int(run_after if run_after is not None else now_epoch())
+    if dedupe_key:
+        existing = conn.execute(
+            """
+            SELECT id, status
+            FROM background_jobs
+            WHERE dedupe_key = ?
+              AND status IN ('queued', 'running')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (dedupe_key,),
+        ).fetchone()
+        if existing is not None:
+            return {
+                "job_id": int(existing["id"]),
+                "queued": False,
+                "deduplicated": True,
+            }
+
+    cur = conn.execute(
+        """
+        INSERT INTO background_jobs(
+            job_type, title, source, status, slot_key, dedupe_key, priority,
+            payload_json, attempt_count, max_attempts, run_after, created_at, updated_at
+        )
+        VALUES(?, ?, ?, 'queued', ?, ?, ?, ?, 0, ?, ?, ?, ?)
+        """,
+        (
+            job_type,
+            title,
+            source,
+            slot_key,
+            dedupe_key,
+            int(priority),
+            _settings_value_json(payload),
+            int(max_attempts),
+            due_at,
+            ts,
+            ts,
+        ),
+    )
+    job_id = require_lastrowid(cur)
+    _insert_background_job_event(conn, job_id, "enqueued", {"source": source})
+    emit_app_event(conn, "queue.updated", {"job_id": job_id})
+    return {
+        "job_id": job_id,
+        "queued": True,
+        "deduplicated": False,
+    }
+
+
+def list_background_jobs(
+    conn: sqlite3.Connection,
+    *,
+    statuses: tuple[str, ...] | None = None,
+    job_type: str | None = None,
+    source: str | None = None,
+    limit: int = 500,
+) -> list[sqlite3.Row]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if statuses:
+        placeholders = ", ".join("?" for _ in statuses)
+        clauses.append(f"status IN ({placeholders})")
+        params.extend(statuses)
+    if job_type:
+        clauses.append("job_type = ?")
+        params.append(job_type)
+    if source:
+        clauses.append("source = ?")
+        params.append(source)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(int(limit))
+    return conn.execute(
+        f"""
+        SELECT id, job_type, title, source, status, outcome_code, slot_key,
+               dedupe_key, priority, payload_json, result_json, error_text,
+               attempt_count, max_attempts, run_after, worker_id, lease_expires_at,
+               heartbeat_at, cancel_requested_at, terminate_requested_at,
+               created_at, updated_at, started_at, finished_at
+        FROM background_jobs
+        {where}
+        ORDER BY
+            CASE status
+                WHEN 'running' THEN 0
+                WHEN 'queued' THEN 1
+                ELSE 2
+            END,
+            priority ASC,
+            id DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
+
+def fetch_background_job(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT id, job_type, title, source, status, outcome_code, slot_key,
+               dedupe_key, priority, payload_json, result_json, error_text,
+               attempt_count, max_attempts, run_after, worker_id, lease_expires_at,
+               heartbeat_at, cancel_requested_at, terminate_requested_at,
+               created_at, updated_at, started_at, finished_at
+        FROM background_jobs
+        WHERE id = ?
+        """,
+        (int(job_id),),
+    ).fetchone()
+
+
+def list_background_job_events(conn: sqlite3.Connection, job_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT id, event_type, payload_json, created_at
+        FROM background_job_events
+        WHERE job_id = ?
+        ORDER BY id
+        """,
+        (int(job_id),),
+    ).fetchall()
+
+
+def list_runnable_background_jobs(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT id, job_type, title, source, status, slot_key, priority, payload_json,
+               attempt_count, max_attempts, run_after, lease_expires_at,
+               cancel_requested_at, terminate_requested_at, created_at, started_at
+        FROM background_jobs
+        WHERE status = 'queued'
+          AND run_after <= ?
+        ORDER BY priority ASC, id ASC
+        LIMIT ?
+        """,
+        (now_epoch(), int(limit)),
+    ).fetchall()
+
+
+def claim_background_job(
+    conn: sqlite3.Connection,
+    job_id: int,
+    *,
+    worker_id: str,
+    lease_seconds: int,
+) -> sqlite3.Row | None:
+    ts = now_iso()
+    now = now_epoch()
+    lease_expires = now + int(lease_seconds)
+    cur = conn.execute(
+        """
+        UPDATE background_jobs
+        SET status = 'running',
+            worker_id = ?,
+            lease_expires_at = ?,
+            heartbeat_at = ?,
+            started_at = coalesce(started_at, ?),
+            updated_at = ?,
+            attempt_count = attempt_count + 1
+        WHERE id = ?
+          AND status = 'queued'
+        """,
+        (worker_id, lease_expires, now, ts, ts, int(job_id)),
+    )
+    if cur.rowcount == 0:
+        return None
+    _insert_background_job_event(conn, job_id, "running", {"worker_id": worker_id})
+    emit_app_event(conn, "queue.updated", {"job_id": int(job_id)})
+    return fetch_background_job(conn, int(job_id))
+
+
+def heartbeat_background_job(
+    conn: sqlite3.Connection,
+    job_id: int,
+    *,
+    worker_id: str,
+    lease_seconds: int,
+) -> bool:
+    cur = conn.execute(
+        """
+        UPDATE background_jobs
+        SET heartbeat_at = ?,
+            lease_expires_at = ?,
+            updated_at = ?
+        WHERE id = ?
+          AND status = 'running'
+          AND worker_id = ?
+        """,
+        (now_epoch(), now_epoch() + int(lease_seconds), now_iso(), int(job_id), worker_id),
+    )
+    return cur.rowcount > 0
+
+
+def complete_background_job(
+    conn: sqlite3.Connection,
+    job_id: int,
+    *,
+    result: Any = None,
+    outcome_code: str | None = None,
+) -> None:
+    ts = now_iso()
+    conn.execute(
+        """
+        UPDATE background_jobs
+        SET status = 'succeeded',
+            outcome_code = ?,
+            result_json = ?,
+            error_text = NULL,
+            worker_id = NULL,
+            lease_expires_at = NULL,
+            heartbeat_at = NULL,
+            updated_at = ?,
+            finished_at = ?
+        WHERE id = ?
+        """,
+        (outcome_code, _settings_value_json(result), ts, ts, int(job_id)),
+    )
+    _insert_background_job_event(conn, job_id, "succeeded", {"outcome_code": outcome_code})
+    emit_app_event(conn, "queue.updated", {"job_id": int(job_id)})
+
+
+def requeue_background_job_after_retryable_error(
+    conn: sqlite3.Connection,
+    job_id: int,
+    *,
+    error_text: str,
+    delay_seconds: int = 30,
+) -> None:
+    ts = now_iso()
+    conn.execute(
+        """
+        UPDATE background_jobs
+        SET status = 'queued',
+            error_text = ?,
+            worker_id = NULL,
+            lease_expires_at = NULL,
+            heartbeat_at = NULL,
+            updated_at = ?,
+            run_after = ?
+        WHERE id = ?
+        """,
+        (error_text, ts, now_epoch() + int(delay_seconds), int(job_id)),
+    )
+    _insert_background_job_event(conn, job_id, "requeued", {"error": error_text, "delay_seconds": delay_seconds})
+    emit_app_event(conn, "queue.updated", {"job_id": int(job_id)})
+
+
+def fail_background_job(
+    conn: sqlite3.Connection,
+    job_id: int,
+    *,
+    error_text: str,
+    outcome_code: str | None = None,
+) -> None:
+    ts = now_iso()
+    conn.execute(
+        """
+        UPDATE background_jobs
+        SET status = 'failed',
+            outcome_code = ?,
+            error_text = ?,
+            worker_id = NULL,
+            lease_expires_at = NULL,
+            heartbeat_at = NULL,
+            updated_at = ?,
+            finished_at = ?
+        WHERE id = ?
+        """,
+        (outcome_code, error_text, ts, ts, int(job_id)),
+    )
+    _insert_background_job_event(conn, job_id, "failed", {"error": error_text, "outcome_code": outcome_code})
+    emit_app_event(conn, "queue.updated", {"job_id": int(job_id)})
+
+
+def cancel_queued_background_job(conn: sqlite3.Connection, job_id: int) -> bool:
+    ts = now_iso()
+    cur = conn.execute(
+        """
+        UPDATE background_jobs
+        SET status = 'cancelled',
+            error_text = 'cancelled before start',
+            updated_at = ?,
+            finished_at = ?
+        WHERE id = ?
+          AND status = 'queued'
+        """,
+        (ts, ts, int(job_id)),
+    )
+    if cur.rowcount == 0:
+        return False
+    _insert_background_job_event(conn, job_id, "cancelled", {"reason": "cancelled before start"})
+    emit_app_event(conn, "queue.updated", {"job_id": int(job_id)})
+    return True
+
+
+def cancel_running_background_job(conn: sqlite3.Connection, job_id: int) -> bool:
+    ts = now_iso()
+    cur = conn.execute(
+        """
+        UPDATE background_jobs
+        SET cancel_requested_at = ?,
+            updated_at = ?
+        WHERE id = ?
+          AND status = 'running'
+        """,
+        (ts, ts, int(job_id)),
+    )
+    if cur.rowcount == 0:
+        return False
+    _insert_background_job_event(conn, job_id, "cancel_requested", None)
+    emit_app_event(conn, "queue.updated", {"job_id": int(job_id)})
+    return True
+
+
+def request_terminate_background_job(conn: sqlite3.Connection, job_id: int) -> bool:
+    ts = now_iso()
+    cur = conn.execute(
+        """
+        UPDATE background_jobs
+        SET cancel_requested_at = coalesce(cancel_requested_at, ?),
+            terminate_requested_at = ?,
+            updated_at = ?
+        WHERE id = ?
+          AND status = 'running'
+        """,
+        (ts, ts, ts, int(job_id)),
+    )
+    if cur.rowcount == 0:
+        return False
+    _insert_background_job_event(conn, job_id, "terminate_requested", None)
+    emit_app_event(conn, "queue.updated", {"job_id": int(job_id)})
+    return True
+
+
+def finish_cancelled_background_job(conn: sqlite3.Connection, job_id: int, *, error_text: str) -> None:
+    ts = now_iso()
+    conn.execute(
+        """
+        UPDATE background_jobs
+        SET status = 'cancelled',
+            error_text = ?,
+            worker_id = NULL,
+            lease_expires_at = NULL,
+            heartbeat_at = NULL,
+            updated_at = ?,
+            finished_at = ?
+        WHERE id = ?
+        """,
+        (error_text, ts, ts, int(job_id)),
+    )
+    _insert_background_job_event(conn, job_id, "cancelled", {"reason": error_text})
+    emit_app_event(conn, "queue.updated", {"job_id": int(job_id)})
+
+
+def retry_background_job(conn: sqlite3.Connection, job_id: int) -> bool:
+    ts = now_iso()
+    cur = conn.execute(
+        """
+        UPDATE background_jobs
+        SET status = 'queued',
+            outcome_code = NULL,
+            result_json = NULL,
+            error_text = NULL,
+            attempt_count = 0,
+            run_after = ?,
+            worker_id = NULL,
+            lease_expires_at = NULL,
+            heartbeat_at = NULL,
+            cancel_requested_at = NULL,
+            terminate_requested_at = NULL,
+            started_at = NULL,
+            finished_at = NULL,
+            updated_at = ?
+        WHERE id = ?
+          AND status IN ('failed', 'cancelled', 'succeeded')
+        """,
+        (now_epoch(), ts, int(job_id)),
+    )
+    if cur.rowcount == 0:
+        return False
+    _insert_background_job_event(conn, job_id, "retry_requested", None)
+    emit_app_event(conn, "queue.updated", {"job_id": int(job_id)})
+    return True
+
+
+def purge_background_jobs(
+    conn: sqlite3.Connection,
+    *,
+    job_ids: list[int] | None = None,
+    statuses: tuple[str, ...] = ("succeeded", "failed", "cancelled"),
+) -> int:
+    if job_ids:
+        placeholders = ", ".join("?" for _ in job_ids)
+        cur = conn.execute(
+            f"""
+            DELETE FROM background_jobs
+            WHERE id IN ({placeholders})
+              AND status IN ('succeeded', 'failed', 'cancelled')
+            """,
+            tuple(int(job_id) for job_id in job_ids),
+        )
+        if cur.rowcount:
+            emit_app_event(conn, "queue.updated", {"purged": int(cur.rowcount)})
+        return int(cur.rowcount or 0)
+
+    placeholders = ", ".join("?" for _ in statuses)
+    cur = conn.execute(
+        f"DELETE FROM background_jobs WHERE status IN ({placeholders})",
+        statuses,
+    )
+    if cur.rowcount:
+        emit_app_event(conn, "queue.updated", {"purged": int(cur.rowcount)})
+    return int(cur.rowcount or 0)
+
+
+def recover_stale_background_jobs(conn: sqlite3.Connection) -> int:
+    ts = now_iso()
+    cur = conn.execute(
+        """
+        UPDATE background_jobs
+        SET status = 'queued',
+            worker_id = NULL,
+            lease_expires_at = NULL,
+            heartbeat_at = NULL,
+            updated_at = ?
+        WHERE status = 'running'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at < ?
+        """,
+        (ts, now_epoch()),
+    )
+    recovered = int(cur.rowcount or 0)
+    if recovered:
+        conn.execute(
+            """
+            INSERT INTO background_job_events(job_id, event_type, payload_json, created_at)
+            SELECT id, 'recovered_stale', NULL, ?
+            FROM background_jobs
+            WHERE status = 'queued'
+              AND updated_at = ?
+            """,
+            (ts, ts),
+        )
+        emit_app_event(conn, "queue.updated", {"recovered": recovered})
+    return recovered
 
 
 def require_lastrowid(cur: sqlite3.Cursor) -> int:
@@ -471,6 +1037,28 @@ def profile_url_row_by_canonical(
         WHERE u.canonical_url = ?
         """,
         (canonical,),
+    ).fetchone()
+
+
+def profile_url_row_by_id(
+    conn: sqlite3.Connection,
+    profile_url_id: int,
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT u.*,
+               p.creator_id,
+               p.platform,
+               p.platform_id,
+               p.display_name,
+               p.identity_state,
+               c.primary_name
+        FROM profile_urls u
+        JOIN creator_profiles p ON p.id = u.profile_id
+        JOIN creators c ON c.id = p.creator_id
+        WHERE u.id = ?
+        """,
+        (int(profile_url_id),),
     ).fetchone()
 
 
@@ -903,37 +1491,6 @@ def delete_profile_if_orphaned(conn: sqlite3.Connection, profile_id: int) -> Non
     if int(counts["url_count"]) == 0 and int(counts["alias_count"]) == 0 and int(counts["post_count"]) == 0:
         conn.execute("DELETE FROM creator_profiles WHERE id = ?", (profile_id,))
         touch_creator(conn, int(row["creator_id"]))
-
-
-def upsert_profile_job(conn: sqlite3.Connection, profile_url_id: int) -> None:
-    row = conn.execute(
-        "SELECT id, status FROM profile_enrichment_jobs WHERE profile_url_id = ?",
-        (profile_url_id,),
-    ).fetchone()
-    ts = now_iso()
-    if row:
-        if row["status"] == "done":
-            return
-        conn.execute(
-            """
-            UPDATE profile_enrichment_jobs
-            SET status = 'pending',
-                last_error = NULL,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (ts, row["id"]),
-        )
-        return
-    conn.execute(
-        """
-        INSERT INTO profile_enrichment_jobs(
-            profile_url_id, status, attempts, last_error, created_at, updated_at
-        )
-        VALUES(?, 'pending', 0, NULL, ?, ?)
-        """,
-        (profile_url_id, ts, ts),
-    )
 
 
 def insert_or_update_post(

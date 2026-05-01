@@ -200,14 +200,12 @@ class PostsTab(BaseMaintenanceTab):
         JsonViewDialog(f"貼文 #{row['id']} 詳細資訊", payload, self).exec()
 
     def _refetch_post_meta(self, row: dict[str, Any]) -> None:
-        try:
-            self._controller.write("refetch_post_meta", int(row["id"]))
-        except Exception as exc:
-            LOGGER.exception("refetch_post_meta failed: %s", exc)
-            QMessageBox.warning(self, "重新取得資訊失敗", str(exc))
-            return
-        if self._meta_visible:
-            self._refresh_meta_history(int(row["id"]))
+        post_id = int(row["id"])
+        self._controller.submit_background_job(
+            "command.refetch_post_meta",
+            {"post_id": post_id},
+            dedupe_key=f"command.refetch_post_meta:{post_id}",
+        )
 
     # ── meta history ───────────────────────────────────────────────────────
     def _selected_meta(self) -> dict[str, Any] | None:
