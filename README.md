@@ -192,8 +192,8 @@ python clog_gui.py
 打包：
 
 ```bash
-pyinstaller clog_cli.spec     # → dist/clog-cli.exe（onefile, 純 CLI 無 PySide6, ~16 MB）
-pyinstaller clog.spec         # → dist/clog/clog.exe + dist/clog/_internal/（onedir, GUI 含 PySide6）
+pyinstaller clog_cli.spec     # → dist/clog-cli(.exe)（onefile, 純 CLI 無 PySide6）
+pyinstaller clog.spec         # → dist/clog/clog(.exe) + dist/clog/lib/（onedir, GUI 含 PySide6）
 ```
 
 GUI 採 **onedir** 而非 onefile，原因是 onefile 每次啟動都要把 ~250 MB 解壓到 `%TEMP%`，實測啟動約 18–20 秒；onedir 直接讀檔，啟動降到 0.6 秒。發布時整個 `dist/clog/` 資料夾要一起送給使用者。

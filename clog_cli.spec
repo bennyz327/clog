@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""CLI build spec: clog-cli.exe (console, no PySide6).
+"""CLI build spec: clog-cli executable (console, no PySide6).
 
 Run: pyinstaller clog_cli.spec
 Output: dist/clog-cli.exe
@@ -11,6 +11,8 @@ import sys
 sys.path.insert(0, os.path.abspath('src'))
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
+
+WINDOWS_ICON = 'static/app.ico' if sys.platform == 'win32' else 'NONE'
 
 datas = []
 binaries = []
@@ -44,7 +46,7 @@ exe = EXE(
     a.datas,
     [],
     name='clog-cli',
-    icon='static/app.ico',
+    icon=WINDOWS_ICON,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

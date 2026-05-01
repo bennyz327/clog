@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""GUI build spec: clog.exe (windowed, includes PySide6).
+"""GUI build spec: clog executable (windowed, includes PySide6).
 
 Onedir mode — hydrus-style layout:
 
@@ -10,7 +10,8 @@ Onedir mode — hydrus-style layout:
         ├── gui/themes/light.qss, dark.qss
         └── ...
 
-User data (db/, clog.json, clog.log) is written next to clog.exe on first run,
+User data (db/, clog.json, clog.log) is written next to the main executable on
+first run,
 NOT bundled here. So `dist/clog/db/` only appears after first launch.
 
 Run: pyinstaller clog.spec
@@ -23,6 +24,8 @@ from fnmatch import fnmatch
 sys.path.insert(0, os.path.abspath('src'))
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
+
+WINDOWS_ICON = 'static/app.ico' if sys.platform == 'win32' else 'NONE'
 
 PYSIDE6_EXCLUDES = [
     'PySide6.Qt3DAnimation',
@@ -334,7 +337,7 @@ exe = EXE(
     exclude_binaries=True,
     contents_directory='lib',    # hydrus-style: dist/clog/lib/ (default would be _internal)
     name='clog',
-    icon='static/app.ico',
+    icon=WINDOWS_ICON,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
