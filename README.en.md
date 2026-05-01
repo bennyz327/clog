@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="static/app-splash.png" width="20%" alt="圖片說明">
+</p>
+
 # CreatorLog (`clog`)
 
 [繁體中文 README](README.md)
