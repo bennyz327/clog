@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="static/app-splash.png" width="20%" alt="圖片說明">
+  <img src="static/app-splash.png" width="128" height="128" alt="ScriptPlayer+ icon">
 </p>
 
-# CreatorLog (`clog`)
+<h1 align="center">CreatorLog</h1>
 
 [繁體中文 README](README.md)
 
-`clog` is a local-first tool for organizing creator records, profile URLs, posts, reminders, and work logs in one place.
+CreatorLog (`clog`) is a local-first tool for organizing creator records, profile URLs, posts, reminders, and work logs in one place.
 
 It is meant for people who want to keep their tracking data on their own computer. By default, data is stored locally in SQLite rather than in a cloud service.
 
