@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="static/app-splash.png" width="20%" alt="圖片說明">
+  <img src="static/app-splash.png" width="128" height="128" alt="ScriptPlayer+ icon">
 </p>
 
-# CreatorLog (`clog`)
+<h1 align="center">CreatorLog</h1>
 
 [English README](README.en.md)
 
-`clog` 是一個本地端的創作者整理工具，用來把你追蹤的創作者、作者頁網址、貼文、提醒與工作紀錄集中在同一個地方管理。
+CreatorLog (`clog`) 是一個本地端的創作者整理工具，用來把你追蹤的創作者、作者頁網址、貼文、提醒與工作紀錄集中在同一個地方管理。
 
 它適合想把資料留在自己電腦上的人使用。預設資料會存成本地 SQLite 檔案，不需要把內容交給雲端服務。
 
