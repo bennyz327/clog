@@ -1,218 +1,111 @@
 # CreatorLog (`clog`)
 
-`clog` 是一個以「創作者主檔」為核心的本地 SQLite 追蹤工具，用來整理：
+[English README](README.en.md)
 
-- 創作者主檔
-- 平台帳號 / 作者頁 URL
-- 名稱歷史
-- 貼文 metadata
-- 提醒
-- 工作紀錄
+`clog` 是一個本地端的創作者整理工具，用來把你追蹤的創作者、作者頁網址、貼文、提醒與工作紀錄集中在同一個地方管理。
 
-目前資料模型已切到 profile-centric identity model：外部身份的單一真相來源是 `creator_profiles`。
+它適合想把資料留在自己電腦上的人使用。預設資料會存成本地 SQLite 檔案，不需要把內容交給雲端服務。
 
-## 核心概念
+## 可以做什麼
 
-`clog` 把 identity 分成三層：
+- 建立創作者主檔，集中管理同一位創作者的資料
+- 保存作者頁網址與平台帳號，減少重複查找
+- 記錄貼文連結，並在支援的平台上自動補齊部分 metadata
+- 設定提醒，追蹤之後要回看的創作者
+- 新增工作紀錄，保存備忘、觀察或整理筆記
+- 用搜尋快速找出相關創作者、網址、貼文與筆記
 
-- `creators`
-  - 穩定主檔
-  - `primary_name` 只是主標籤，不代表平台當前顯示名稱
-- `creator_profiles`
-  - 系統已知的平台帳號
-  - 唯一身份鍵是 `(platform, platform_id)`
-- `profile_urls`
-  - 掛在 profile 下的作者頁 URL
+## 快速開始
 
-名稱歷史用 `creator_aliases` 表示：
+`clog` 目前提供 GUI 與 CLI 兩種使用方式：
 
-- `profile_id = NULL`：generic alias
-- `profile_id != NULL`：某個 profile 的名稱歷史
+- `clog`：桌面程式，適合日常整理
+- `clog-cli`：命令列工具，適合腳本、自動化或快速輸入
 
-貼文則必須掛在既有 profile 上，不能只掛 creator。
+建議一般使用者直接從 GitHub Releases 下載已打包版本：
 
-## 執行模式
+1. 前往 [Releases](https://github.com/bennyz327/clog/releases)
+2. 下載適合你的平台壓縮檔：`windows-x64` 或 `linux-x64`
+3. 解壓縮後啟動 `clog`（Windows 會是 `clog.exe`）
+4. 第一次啟動後，程式會在目錄下建立自己的本地資料檔
 
-打包後產出兩支 exe：
+如果你只想用圖形介面，可以直接開 `clog`；CLI 是選用的，不必先學會才能開始使用。
 
-- `clog.exe`：原生 GUI（PySide6）。雙擊啟動。
-- `clog-cli.exe`：純 CLI / 自動化腳本用。
+## 常見用法
 
-兩支共用同一個 `clog.json` 與 `clog.sqlite`（依 `clog.json` 的 `db_path` 決定）；GUI 跑背景 enrichment 時會自動 spawn 同目錄的 `clog-cli.exe __meta_worker`，不會把 GUI 自己當 worker。
+### GUI
 
-範例 CLI 用法：
+GUI 適合把 `clog` 當成日常整理工具來用。典型流程通常是：
+
+1. 新增創作者
+2. 補上作者頁網址或平台帳號
+3. 記錄想保存的貼文
+4. 視需要加上提醒或工作紀錄
+5. 之後用搜尋快速回到同一位創作者
+
+### CLI
+
+CLI 適合偏好終端機、想快速輸入，或要整合進自己的流程時使用。以下是常見例子：
 
 ```bash
-clog-cli a "creator name" https://x.com/example
-clog-cli n #1 "old alias"
-clog-cli u #1 https://www.pixiv.net/users/123456
-clog-cli p https://x.com/example/status/123
+clog-cli init
+clog-cli add "Creator Name" https://x.com/example
+clog-cli name "#1" "Old Alias"
+clog-cli url "#1" https://www.pixiv.net/users/123456
+clog-cli post https://x.com/example/status/123
+clog-cli remind "#1" 7d --note "check updates"
+clog-cli work "#1" "Commission status noted."
+clog-cli search example
+clog-cli show "#1"
 ```
 
-## 常用命令
+主要命令如下：
 
 | 功能 | 命令 |
 |---|---|
-| 初始化 | `clog i` / `clog init` |
-| 新增創作者 | `clog a NAME [URL] [--note TEXT]` |
-| 新增名稱 | `clog n TARGET NAME [CONTEXT]` |
-| 新增作者頁 URL | `clog u TARGET URL [--note TEXT]` |
-| 記錄貼文 | `clog p URL [TARGET] [--note TEXT]` |
-| 設提醒 | `clog r TARGET WHEN` |
-| 查看提醒 | `clog d` |
-| 近期清單 | `clog ls` |
-| 新增工作紀錄 | `clog c TARGET CONTENT` |
-| 搜尋 | `clog s QUERY` / `clog QUERY` |
-| 查看主檔 | `clog v TARGET` |
+| 初始化 | `clog-cli init` |
+| 新增創作者 | `clog-cli add NAME [URL]` |
+| 新增名稱 | `clog-cli name TARGET NAME [CONTEXT]` |
+| 新增作者頁網址 | `clog-cli url TARGET URL` |
+| 記錄貼文 | `clog-cli post URL [TARGET]` |
+| 設提醒 | `clog-cli remind TARGET WHEN` |
+| 查看提醒 | `clog-cli due` |
+| 近期清單 | `clog-cli ls` |
+| 新增工作紀錄 | `clog-cli work TARGET CONTENT` |
+| 搜尋 | `clog-cli search QUERY` |
+| 查看主檔 | `clog-cli show TARGET` |
 
-## TARGET 解析
+短別名仍可使用，但公開文件以完整命令為主，較容易閱讀與記憶。
 
-大多數命令的 `TARGET` 支援：
+## 給開發者
 
-```text
-#12
-https://platform/profile
-platform:platform_id
-名稱（前提是只命中一位 creator）
-```
-
-如果同名或模糊命中多位 creator，程式會拒絕並列出候選，要求改用 `#id` / URL / `platform:platform_id`。
-
-## `add name`
-
-CLI 形式：
+如果你想直接從原始碼執行：
 
 ```bash
-clog n TARGET NAME
-clog n TARGET NAME pixiv
-clog n TARGET NAME https://site.example/creator-page
-```
-
-語意：
-
-- 沒有 `CONTEXT`
-  - 建立 generic alias
-- `CONTEXT` 是平台字串
-  - 在該 creator 底下找既有 profile
-  - 剛好一筆時，建立 profile-bound rename
-  - 0 筆或多筆都會拒絕
-- `CONTEXT` 是作者頁 URL
-  - 走 `add url` 的 profile attach pipeline
-  - 成功後把 alias 綁到該 profile
-
-## `add url`
-
-CLI 形式：
-
-```bash
-clog u TARGET URL [--note TEXT]
-```
-
-規則：
-
-- 只接受作者頁 URL，不接受使用者手填 platform / platform_id
-- 先 canonicalize，再用 gallery-dl extractor 類型判斷：
-  - `post-like`：拒絕，改用 `clog p`
-  - `profile-like` / `unknown`：允許
-- metadata 成功時：
-  - resolve 或 upsert resolved profile
-  - attach `profile_urls`
-- metadata 失敗或不足時：
-  - 仍建立 unresolved profile + profile_url
-
-## `add post`
-
-CLI 形式：
-
-```bash
-clog p URL [TARGET] [--note TEXT]
-```
-
-規則：
-
-- 只接受 post URL
-- 一定會跑 gallery-dl metadata
-- post metadata 必須命中既有 `(platform, platform_id)` profile
-- 沒有既有 profile 就拒絕，提示先用 `add url` 或 `add name via URL`
-- `TARGET` 只拿來驗證命中的 profile 是否屬於該 creator，不能作 fallback
-- `add post` 不會補建或更新 profile / profile_url / alias
-
-## Worklogs
-
-- `worklogs` 只綁 `creator_id`
-- 內容只存單一 `content` 欄位
-- `content` 保存 raw markdown source，現在先當純文字顯示
-- CLI 不再提供 tags / paths / urls / metadata JSON 的獨立輸入欄位
-
-## 搜尋
-
-搜尋建立在 SQLite FTS5 上，輸出以 creator 分組。索引來源包含：
-
-- creator
-- alias
-- profile
-- profile_url
-- post
-- reminder
-- work
-
-## 資料表
-
-主要表如下：
-
-- `creators`
-- `creator_profiles`
-- `profile_urls`
-- `creator_aliases`
-- `posts`
-- `reminders`
-- `worklogs`
-- `profile_enrichment_jobs`
-- `search_fts`
-
-完整 ER 與欄位說明見 [docs/ER.md](docs/ER.md)。
-
-## 開發備註
-
-- 這版 schema 是 fresh baseline，不支援 migration
-- 若本機舊 dev DB 仍是舊格式，程式會直接報不相容，要求刪掉重建
-- metadata worker 只負責 profile 補全，不負責 post 歸屬以外的 side effect
-
-## 原始碼執行
-
-```bash
-# CLI 開發入口
+python -m pip install -r requirements.txt
 python clog_cli.py init
-python clog_cli.py a example https://x.com/example
-
-# GUI 開發入口
 python clog_gui.py
 ```
 
-打包：
+CLI 開發入口也可以直接這樣使用：
 
 ```bash
-pyinstaller clog_cli.spec     # → dist/clog-cli(.exe)（onefile, 純 CLI 無 PySide6）
-pyinstaller clog.spec         # → dist/clog/clog(.exe) + dist/clog/lib/（onedir, GUI 含 PySide6）
+python clog_cli.py add "Creator Name" https://x.com/example
+python clog_cli.py search example
 ```
 
-GUI 採 **onedir** 而非 onefile，原因是 onefile 每次啟動都要把 ~250 MB 解壓到 `%TEMP%`，實測啟動約 18–20 秒；onedir 直接讀檔，啟動降到 0.6 秒。發布時整個 `dist/clog/` 資料夾要一起送給使用者。
+目前相依套件主要包含：
 
-主要原始碼位於 `src/`，套件結構：
+- Python 3.13
+- PySide6
+- gallery-dl
+- PyInstaller（打包時需要）
 
-```
-src/
-├── core/          # 共用業務邏輯（CLI + GUI 都用）
-│   ├── constants.py
-│   ├── config.py / utils.py / render.py / gallery.py / service.py
-│   ├── enrichment.py    # profile metadata 補全：CLI 走 SubprocessDriver、GUI 走 InProcessRunner
-│   ├── pubsub.py / jobs.py
-│   └── controller.py    # GUI 用單例：read/write dispatch + DB lock + pubsub + JobPool
-├── db/            # SQLite schema + 全部 query function（單檔，re-export）
-├── cli/           # CLI 介面層
-│   ├── main.py / dispatch.py / commands.py / printers.py / tty.py
-└── gui/           # PySide6 介面層
-    ├── app.py / main_window.py / pubsub_bridge.py
-    ├── themes/{light,dark}.qss
-    └── dialogs/{add_creator,add_name,add_url,add_post,add_work,set_reminder}.py
-```
+## 更多技術細節
+
+- 資料模型與 ER 說明：[`docs/ER.md`](docs/ER.md)
+- 發布流程：GitHub Actions 會產出 Windows 與 Linux 的 release build
+
+## License
+
+本專案採用 [MIT License](LICENSE)。
